@@ -45,6 +45,28 @@ def cache_set(key, value, ttl=60):
 
 # ========================================
 
+# ========== DATABASE-BACKED STORAGE ==========
+from db import db_load, db_save
+
+# Load positions from database on startup
+stored_positions = db_load('positions', {})
+stored_watchlist = db_load('watchlist', {})
+stored_journal = db_load('journal', [])
+
+def save_positions():
+    """Save positions to database"""
+    db_save('positions', stored_positions)
+
+def save_watchlist():
+    """Save watchlist to database"""
+    db_save('watchlist', stored_watchlist)
+
+def save_journal():
+    """Save journal to database"""
+    db_save('journal', stored_journal)
+
+# =============================================
+
 api_key = os.getenv('POLYGON_API_KEY', '')
 anthropic_key = os.getenv('ANTHROPIC_API_KEY', '')
 api = None
@@ -59,6 +81,10 @@ if api_key and HAS_MANAGER:
 
 journal = TradeJournal()
 scanner = SmartScanner(api, anthropic_key)
+
+# Load watchlist from database into scanner
+if stored_watchlist:
+    scanner.watchlist = stored_watchlist
 
 claude_model = os.getenv('CLAUDE_MODEL', 'claude-sonnet-4-20250514')
 advisor = AITradingAdvisor(anthropic_key, claude_model)
@@ -703,18 +729,28 @@ def analyze(symbol):
 def add_watchlist():
     symbol = request.form.get('symbol', '').upper()
     sector = request.form.get('sector', '')
-    if symbol: scanner.add_to_watchlist(symbol, '', sector, '')
+    if symbol: 
+        scanner.add_to_watchlist(symbol, '', sector, '')
+        # Save to database
+        stored_watchlist[symbol] = scanner.watchlist.get(symbol, {'symbol': symbol, 'sector': sector})
+        save_watchlist()
     return redirect(url_for('scanner_tab'))
 
 @app.route('/remove-watchlist/<symbol>')
 def remove_watchlist(symbol):
     scanner.remove_from_watchlist(symbol)
+    # Remove from database
+    if symbol in stored_watchlist:
+        del stored_watchlist[symbol]
+        save_watchlist()
     return redirect(url_for('scanner_tab'))
 
 @app.route('/positions')
 def positions_tab():
     market, positions, portfolio, journal_data, total_pnl, hot_list = get_data()
-    return render_template_string(HTML, tab='positions', market=market, positions=positions, portfolio=portfolio, journal_data=journal_data, total_pnl=total_pnl, hot_list=hot_list, hot_count=len(hot_list), watchlist=list(scanner.watchlist.values()))
+    # Merge database positions with manager positions
+    all_positions = {**stored_positions, **positions}
+    return render_template_string(HTML, tab='positions', market=market, positions=all_positions, portfolio=portfolio, journal_data=journal_data, total_pnl=total_pnl, hot_list=hot_list, hot_count=len(hot_list), watchlist=list(scanner.watchlist.values()))
 
 @app.route('/add', methods=['GET', 'POST'])
 def add_position():
@@ -727,18 +763,46 @@ def add_position():
             contracts = int(request.form.get('contracts', 1))
             entry_price = float(request.form.get('entry_price', 0))
             
-            if symbol and strike and entry_price and manager:
-                from pro_manager import Position, PositionType
-                ptype = PositionType.LONG_CALL if 'CALL' in pos_type else PositionType.LONG_PUT
-                pos = Position(
-                    symbol=symbol,
-                    position_type=ptype,
-                    strike=strike,
-                    expiration=expiration,
-                    contracts=contracts,
-                    entry_option_price=entry_price
-                )
-                manager.add_position(pos)
+            if symbol and strike and entry_price:
+                # Create unique position ID
+                import uuid
+                pos_id = f"{symbol}_{strike}_{uuid.uuid4().hex[:6]}"
+                
+                # Save to database
+                stored_positions[pos_id] = {
+                    'symbol': symbol,
+                    'type': pos_type,
+                    'strike': strike,
+                    'expiration': expiration,
+                    'contracts': contracts,
+                    'entry_option': entry_price,
+                    'current_option': entry_price,
+                    'entry_price': entry_price,  # for display
+                    'pnl_percent': 0,
+                    'pnl_dollars': 0,
+                    'dte': 30,  # placeholder
+                    'delta': 0.50,  # placeholder
+                    'created': datetime.now().isoformat()
+                }
+                save_positions()
+                
+                # Also add to manager if available
+                if manager:
+                    try:
+                        from pro_manager import Position, PositionType
+                        ptype = PositionType.LONG_CALL if 'CALL' in pos_type else PositionType.LONG_PUT
+                        pos = Position(
+                            symbol=symbol,
+                            position_type=ptype,
+                            strike=strike,
+                            expiration=expiration,
+                            contracts=contracts,
+                            entry_option_price=entry_price
+                        )
+                        manager.add_position(pos)
+                    except:
+                        pass
+                
             return redirect(url_for('positions_tab'))
         except Exception as e:
             print(f"Add position error: {e}")
@@ -805,11 +869,39 @@ def refresh():
 
 @app.route('/delete/<pos_id>')
 def delete(pos_id):
-    if manager: manager.remove_position(pos_id)
+    # Remove from database
+    if pos_id in stored_positions:
+        del stored_positions[pos_id]
+        save_positions()
+    # Also remove from manager
+    if manager: 
+        try:
+            manager.remove_position(pos_id)
+        except:
+            pass
     return redirect(url_for('positions_tab'))
 
 @app.route('/close/<pos_id>')
 def close(pos_id):
+    # Log to journal and remove from database
+    if pos_id in stored_positions:
+        pos_data = stored_positions[pos_id]
+        # Add to journal
+        stored_journal.append({
+            'symbol': pos_data.get('symbol', ''),
+            'type': pos_data.get('type', ''),
+            'entry_price': pos_data.get('entry_option', 0),
+            'exit_price': pos_data.get('current_option', pos_data.get('entry_option', 0)),
+            'pnl': pos_data.get('pnl_dollars', 0),
+            'net_pnl': pos_data.get('pnl_dollars', 0),
+            'exit_date': datetime.now().strftime('%Y-%m-%d'),
+            'exit_reason': 'MANUAL'
+        })
+        save_journal()
+        del stored_positions[pos_id]
+        save_positions()
+    
+    # Also handle manager positions
     if manager and pos_id in manager.positions:
         pos = manager.positions[pos_id]
         journal.log_from_position(pos, "MANUAL")
