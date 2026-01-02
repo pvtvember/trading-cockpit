@@ -433,41 +433,167 @@ HTML = '''
         {% endif %}
         
         {% elif tab == 'scanner' %}
-        <!-- SCANNER -->
-        <div class="banner">
-            <div class="banner-headline">🔥 Hot List</div>
-            <div class="banner-sub">AI-powered stock screening</div>
+        <!-- SCANNER - AI POWERED -->
+        <div class="banner" style="border-color:rgba(255,165,0,0.4);">
+            <div class="banner-headline">🔥 AI Hot List Scanner</div>
+            <div class="banner-sub">Claude Opus analyzes breakouts & continuations for high-probability trades</div>
         </div>
         
         <div style="margin-bottom:12px;display:flex;gap:10px;flex-wrap:wrap;">
             <button class="btn btn-primary" onclick="openModal('add-watchlist')">➕ Add Stock</button>
-            <a href="/scan" class="btn btn-secondary">🔄 Scan</a>
+            <a href="/ai-scan" class="btn btn-secondary" style="background:linear-gradient(135deg,#7b2cbf,#5a189a);">🤖 AI Deep Scan</a>
+            <a href="/quick-scan" class="btn btn-secondary">⚡ Quick Scan</a>
         </div>
+        
+        {% if ai_scan_results %}
+        <!-- AI Analysis Summary -->
+        <div class="card" style="margin-bottom:15px;border-left:4px solid #7b2cbf;">
+            <div class="card-header" style="color:#7b2cbf;">🤖 AI Market Analysis</div>
+            <div class="card-body">
+                <p style="font-size:0.9em;white-space:pre-line;">{{ ai_scan_results.market_context }}</p>
+                {% if ai_scan_results.top_pick %}
+                <div style="background:rgba(0,200,83,0.1);border-radius:8px;padding:12px;margin-top:12px;">
+                    <div style="color:#00c853;font-weight:600;margin-bottom:5px;">⭐ TOP PICK: {{ ai_scan_results.top_pick.symbol }}</div>
+                    <div style="font-size:0.9em;">{{ ai_scan_results.top_pick.reason }}</div>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+        {% endif %}
         
         {% if hot_list %}
         {% for h in hot_list %}
-        <div class="hot-item {{ 'a-plus' if h.setup_quality == 'A+' else 'a' if h.setup_quality == 'A' else 'b' if h.setup_quality == 'B' else 'c' }}">
-            <div class="hot-header">
-                <div>
-                    <span class="hot-rank">#{{ h.rank }}</span>
-                    <span class="hot-symbol">{{ h.symbol }}</span>
-                    <span class="{{ 'green' if h.change_pct > 0 else 'red' }}" style="margin-left:8px;font-size:0.85em;">{{ '%+.1f'|format(h.change_pct) }}%</span>
+        <div class="card" style="margin-bottom:12px;border-left:4px solid {{ '#00c853' if h.setup_quality in ['A+','A'] else '#ffc107' if h.setup_quality == 'B' else '#888' }};">
+            <div class="card-body">
+                <!-- Header -->
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+                    <div>
+                        <span style="font-size:1.4em;font-weight:700;color:#00d4ff;margin-right:8px;">#{{ h.rank }}</span>
+                        <span style="font-size:1.2em;font-weight:700;">{{ h.symbol }}</span>
+                        <span class="{{ 'green' if h.change_pct > 0 else 'red' }}" style="margin-left:10px;">{{ '%+.1f'|format(h.change_pct) }}%</span>
+                    </div>
+                    <div style="text-align:right;">
+                        <div style="font-size:1.5em;font-weight:700;color:{{ '#00c853' if h.setup_quality in ['A+','A'] else '#ffc107' if h.setup_quality == 'B' else '#888' }};">{{ h.setup_quality }}</div>
+                        <div style="font-size:0.75em;color:#888;">Score: {{ '%.0f'|format(h.hot_score) }}/100</div>
+                    </div>
                 </div>
-                <span class="hot-score">{{ h.setup_quality }} ({{ '%.0f'|format(h.hot_score) }})</span>
-            </div>
-            <div style="font-size:0.9em;color:#aaa;margin:8px 0;">{{ h.headline }}</div>
-            {% if h.options_rec %}
-            <div class="hot-action">
-                <div class="hot-action-title">📋 Trade</div>
-                <span class="{{ 'green' if h.options_rec.direction == 'CALL' else 'red' }}">{{ h.options_rec.direction }}</span>
-                ${{ h.options_rec.strike }} exp {{ h.options_rec.expiration }}
-            </div>
-            {% endif %}
-            <div style="margin-top:10px;">
-                <a href="/analyze/{{ h.symbol }}" class="btn btn-sm btn-secondary">Details</a>
+                
+                <!-- Why Hot -->
+                <div style="background:rgba(255,165,0,0.1);border-radius:8px;padding:12px;margin-bottom:12px;">
+                    <div style="color:#ffa500;font-weight:600;font-size:0.8em;margin-bottom:5px;">🔥 WHY IT'S HOT</div>
+                    <div style="font-size:0.9em;">{{ h.headline }}</div>
+                </div>
+                
+                <!-- Setup Type -->
+                {% if h.setup_type %}
+                <div style="display:inline-block;background:rgba(0,212,255,0.15);padding:4px 10px;border-radius:4px;font-size:0.8em;color:#00d4ff;margin-bottom:12px;">
+                    {{ h.setup_type }}
+                </div>
+                {% endif %}
+                
+                <!-- Key Levels -->
+                {% if h.key_levels %}
+                <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:12px;">
+                    <div style="background:rgba(0,0,0,0.3);padding:10px;border-radius:6px;text-align:center;">
+                        <div style="font-size:0.7em;color:#888;">ENTRY</div>
+                        <div style="font-weight:700;color:#00d4ff;">${{ '%.2f'|format(h.key_levels.entry) }}</div>
+                    </div>
+                    <div style="background:rgba(0,0,0,0.3);padding:10px;border-radius:6px;text-align:center;">
+                        <div style="font-size:0.7em;color:#888;">TARGET</div>
+                        <div style="font-weight:700;color:#00c853;">${{ '%.2f'|format(h.key_levels.target) }}</div>
+                    </div>
+                    <div style="background:rgba(0,0,0,0.3);padding:10px;border-radius:6px;text-align:center;">
+                        <div style="font-size:0.7em;color:#888;">STOP</div>
+                        <div style="font-weight:700;color:#ff5252;">${{ '%.2f'|format(h.key_levels.stop) }}</div>
+                    </div>
+                </div>
+                {% endif %}
+                
+                <!-- Options Trade -->
+                {% if h.options_rec %}
+                <div style="background:linear-gradient(135deg,rgba(0,200,83,0.15),rgba(0,200,83,0.05));border-radius:8px;padding:12px;margin-bottom:12px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <div>
+                            <div style="font-size:0.75em;color:#888;margin-bottom:3px;">RECOMMENDED TRADE</div>
+                            <div style="font-size:1.1em;font-weight:700;">
+                                <span class="{{ 'green' if h.options_rec.direction == 'CALL' else 'red' }}">{{ h.options_rec.direction }}</span>
+                                ${{ h.options_rec.strike }} 
+                                <span style="color:#888;">exp {{ h.options_rec.expiration }}</span>
+                            </div>
+                        </div>
+                        <div style="text-align:right;">
+                            {% if h.options_rec.est_premium %}
+                            <div style="font-size:0.75em;color:#888;">Est. Premium</div>
+                            <div style="font-weight:600;">${{ '%.2f'|format(h.options_rec.est_premium) }}</div>
+                            {% endif %}
+                        </div>
+                    </div>
+                    {% if h.options_rec.rationale %}
+                    <div style="font-size:0.85em;color:#aaa;margin-top:8px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.1);">
+                        💡 {{ h.options_rec.rationale }}
+                    </div>
+                    {% endif %}
+                </div>
+                {% endif %}
+                
+                <!-- Risk/Reward -->
+                {% if h.risk_reward %}
+                <div style="display:flex;gap:15px;margin-bottom:12px;font-size:0.85em;">
+                    <div><span style="color:#888;">R:R</span> <span style="font-weight:600;">{{ h.risk_reward }}</span></div>
+                    <div><span style="color:#888;">Win Prob</span> <span style="font-weight:600;">{{ h.win_probability }}%</span></div>
+                    <div><span style="color:#888;">Timeframe</span> <span style="font-weight:600;">{{ h.timeframe }}</span></div>
+                </div>
+                {% endif %}
+                
+                <!-- AI Notes -->
+                {% if h.ai_notes %}
+                <div style="background:rgba(123,44,191,0.1);border-radius:8px;padding:10px;font-size:0.85em;">
+                    <span style="color:#7b2cbf;">🤖</span> {{ h.ai_notes }}
+                </div>
+                {% endif %}
+                
+                <div style="margin-top:12px;">
+                    <a href="/analyze/{{ h.symbol }}" class="btn btn-sm btn-secondary">📊 Full Analysis</a>
+                </div>
             </div>
         </div>
         {% endfor %}
+        {% else %}
+        <div class="card">
+            <div class="card-body" style="text-align:center;padding:40px;">
+                <div style="font-size:3em;margin-bottom:15px;">🔍</div>
+                <h3 style="margin-bottom:10px;">No Stocks Scanned Yet</h3>
+                <p style="color:#888;margin-bottom:20px;">Add stocks to your watchlist and run AI scan to find breakout opportunities</p>
+                <button class="btn btn-primary" onclick="openModal('add-watchlist')">➕ Add Your First Stock</button>
+            </div>
+        </div>
+        {% endif %}
+        
+        <!-- Watchlist -->
+        <div class="card" style="margin-top:15px;">
+            <div class="card-header">
+                <span>📋 Watchlist ({{ watchlist|length }})</span>
+                {% if watchlist %}<a href="/ai-scan" class="btn btn-sm btn-primary">🤖 Scan All</a>{% endif %}
+            </div>
+            <div class="card-body">
+                {% if watchlist %}
+                {% for w in watchlist %}
+                <div style="display:flex;justify-content:space-between;align-items:center;padding:10px;background:rgba(255,255,255,0.02);border-radius:6px;margin-bottom:8px;">
+                    <div>
+                        <span style="font-weight:700;">{{ w.symbol }}</span>
+                        {% if w.sector %}<span style="color:#888;font-size:0.8em;margin-left:8px;">{{ w.sector }}</span>{% endif %}
+                    </div>
+                    <div style="display:flex;gap:8px;">
+                        <a href="/analyze/{{ w.symbol }}" class="btn btn-sm btn-secondary">📊</a>
+                        <a href="/remove-watchlist/{{ w.symbol }}" class="btn btn-sm btn-danger">✗</a>
+                    </div>
+                </div>
+                {% endfor %}
+                {% else %}
+                <p style="color:#888;text-align:center;">Add stocks to track them</p>
+                {% endif %}
+            </div>
+        </div>
         {% else %}
         <div class="card"><div class="card-body" style="text-align:center;padding:40px;color:#888;">Add stocks and scan</div></div>
         {% endif %}
@@ -718,12 +844,177 @@ def advisor_tab():
 @app.route('/scanner')
 def scanner_tab():
     market, positions, portfolio, journal_data, total_pnl, hot_list = get_data()
-    return render_template_string(HTML, tab='scanner', market=market, positions=positions, portfolio=portfolio, journal_data=journal_data, total_pnl=total_pnl, hot_list=hot_list, hot_count=len(hot_list), watchlist=list(scanner.watchlist.values()))
+    
+    # Check for AI scan results
+    ai_scan_results = cache_get('ai_scan_results')
+    ai_hot_list = cache_get('ai_hot_list')
+    
+    # Use AI hot list if available, otherwise regular
+    display_hot_list = ai_hot_list if ai_hot_list else hot_list
+    
+    return render_template_string(HTML, tab='scanner', market=market, positions=positions, portfolio=portfolio, 
+                                  journal_data=journal_data, total_pnl=total_pnl, 
+                                  hot_list=display_hot_list, hot_count=len(display_hot_list), 
+                                  watchlist=list(scanner.watchlist.values()),
+                                  ai_scan_results=ai_scan_results)
 
 @app.route('/scan')
 def scan():
     try: scanner.scan_watchlist()
     except: pass
+    return redirect(url_for('scanner_tab'))
+
+@app.route('/quick-scan')
+def quick_scan():
+    """Quick technical scan without AI"""
+    try: scanner.scan_watchlist()
+    except: pass
+    return redirect(url_for('scanner_tab'))
+
+@app.route('/ai-scan')
+def ai_scan():
+    """Deep AI-powered scan using Claude"""
+    import requests
+    
+    if not anthropic_key or not stored_watchlist:
+        return redirect(url_for('scanner_tab'))
+    
+    # Get price data for each stock
+    stock_data = []
+    for symbol in stored_watchlist.keys():
+        try:
+            # Get current price from Polygon
+            if api:
+                quote = api.get_quote(symbol)
+                price = quote.get('price', quote.get('last', {}).get('price', 100))
+                change_pct = quote.get('change_pct', quote.get('todaysChangePerc', 0))
+            else:
+                price = 100
+                change_pct = 0
+            
+            stock_data.append({
+                'symbol': symbol,
+                'price': price,
+                'change_pct': change_pct,
+                'sector': stored_watchlist[symbol].get('sector', 'Unknown')
+            })
+        except:
+            stock_data.append({
+                'symbol': symbol,
+                'price': 100,
+                'change_pct': 0,
+                'sector': stored_watchlist[symbol].get('sector', 'Unknown')
+            })
+    
+    # Build prompt for Claude
+    stocks_str = "\n".join([f"- {s['symbol']}: ${s['price']:.2f} ({s['change_pct']:+.1f}% today) - {s['sector']}" for s in stock_data])
+    
+    prompt = f"""You are an expert options trader specializing in breakouts and momentum continuations. Analyze these stocks and identify the best trading opportunities.
+
+WATCHLIST:
+{stocks_str}
+
+For each stock, analyze:
+1. Is this a BREAKOUT setup (breaking key resistance/support) or CONTINUATION setup (trending with pullback entry)?
+2. What's the probability this trade works (estimate %)?
+3. What's the ideal options trade (CALL or PUT, strike, expiration ~2-3 weeks out)?
+
+Respond in this exact JSON format:
+{{
+    "market_context": "Brief overall market assessment for options trading today",
+    "top_pick": {{
+        "symbol": "BEST_SYMBOL",
+        "reason": "Why this is the #1 pick right now"
+    }},
+    "analysis": [
+        {{
+            "symbol": "SYMBOL",
+            "rank": 1,
+            "setup_quality": "A+/A/B/C",
+            "hot_score": 85,
+            "setup_type": "BREAKOUT" or "CONTINUATION",
+            "headline": "One line why this is hot",
+            "key_levels": {{"entry": 150.00, "target": 160.00, "stop": 145.00}},
+            "options_rec": {{
+                "direction": "CALL" or "PUT",
+                "strike": 155,
+                "expiration": "2025-01-17",
+                "est_premium": 3.50,
+                "rationale": "Why this specific contract"
+            }},
+            "risk_reward": "1:3",
+            "win_probability": 65,
+            "timeframe": "5-10 days",
+            "ai_notes": "Key insight or warning"
+        }}
+    ]
+}}
+
+Rank from best to worst opportunity. Be specific with price levels. Only include stocks worth trading."""
+
+    try:
+        response = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": anthropic_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json"
+            },
+            json={
+                "model": claude_model,
+                "max_tokens": 2000,
+                "messages": [{"role": "user", "content": prompt}]
+            },
+            timeout=60
+        )
+        
+        if response.status_code == 200:
+            import json
+            text = response.json()["content"][0]["text"]
+            
+            # Extract JSON from response
+            try:
+                # Find JSON in response
+                start = text.find('{')
+                end = text.rfind('}') + 1
+                if start >= 0 and end > start:
+                    json_str = text[start:end]
+                    result = json.loads(json_str)
+                    
+                    # Store in cache for display
+                    cache_set('ai_scan_results', {
+                        'market_context': result.get('market_context', ''),
+                        'top_pick': result.get('top_pick')
+                    }, 300)
+                    
+                    # Convert to hot_list format
+                    hot_list = []
+                    for item in result.get('analysis', []):
+                        hot_list.append({
+                            'symbol': item.get('symbol', ''),
+                            'rank': item.get('rank', 99),
+                            'setup_quality': item.get('setup_quality', 'C'),
+                            'hot_score': item.get('hot_score', 50),
+                            'setup_type': item.get('setup_type', ''),
+                            'headline': item.get('headline', ''),
+                            'change_pct': next((s['change_pct'] for s in stock_data if s['symbol'] == item.get('symbol')), 0),
+                            'key_levels': item.get('key_levels'),
+                            'options_rec': item.get('options_rec'),
+                            'risk_reward': item.get('risk_reward'),
+                            'win_probability': item.get('win_probability'),
+                            'timeframe': item.get('timeframe'),
+                            'ai_notes': item.get('ai_notes')
+                        })
+                    
+                    # Store hot list
+                    cache_set('ai_hot_list', hot_list, 300)
+                    
+            except json.JSONDecodeError as e:
+                print(f"JSON parse error: {e}")
+                
+    except Exception as e:
+        print(f"AI scan error: {e}")
+    
     return redirect(url_for('scanner_tab'))
 
 @app.route('/analyze/<symbol>')
