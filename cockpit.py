@@ -29,6 +29,7 @@ from position_manager import analyze_position, analyze_portfolio
 from market_monitor import get_market_snapshot, get_position_market_context
 from news_service import get_position_news_summary
 from positions_template import POSITIONS_HTML
+from dashboard_template import DASHBOARD_HTML
 
 app = Flask(__name__)
 
@@ -139,7 +140,8 @@ HTML = '''
     </div>
     
     <div class="nav">
-        <a href="/" class="nav-item {{ 'active' if tab == 'scanner' else '' }}">🔥 Scanner{% if ready_count %}<span class="nav-badge">{{ ready_count }}</span>{% endif %}</a>
+        <a href="/" class="nav-item {{ 'active' if tab == 'dashboard' else '' }}">🚀 Dashboard</a>
+        <a href="/scanner" class="nav-item {{ 'active' if tab == 'scanner' else '' }}">🔥 Scanner{% if ready_count %}<span class="nav-badge">{{ ready_count }}</span>{% endif %}</a>
         <a href="/positions" class="nav-item {{ 'active' if tab == 'positions' else '' }}">📊 Positions{% if position_count %}<span class="nav-badge">{{ position_count }}</span>{% endif %}</a>
         <a href="/journal" class="nav-item {{ 'active' if tab == 'journal' else '' }}">📝 Journal</a>
         <a href="/mentor" class="nav-item {{ 'active' if tab == 'mentor' else '' }}">🎓 Mentor</a>
@@ -147,7 +149,9 @@ HTML = '''
     </div>
     
     <div class="container">
-        {% if tab == 'scanner' %}
+        {% if tab == 'dashboard' %}
+        ''' + DASHBOARD_HTML + '''
+        {% elif tab == 'scanner' %}
         <div class="stats-grid">
             <div class="stat-card"><div class="stat-value green">{{ scan_stats.ready_now }}</div><div class="stat-label">READY NOW</div></div>
             <div class="stat-card"><div class="stat-value cyan">{{ scan_stats.setting_up }}</div><div class="stat-label">SETTING UP</div></div>
@@ -381,6 +385,96 @@ HTML = '''
 
 @app.route('/')
 def index():
+    """Dashboard - Command Center homepage"""
+    from news_service import get_market_news
+    
+    categorized = get_results_by_category()
+    scan_stats = get_scan_stats()
+    positions = position_get_all('OPEN')
+    stats = journal_get_statistics()
+    
+    # Get portfolio analysis
+    portfolio = None
+    if positions:
+        portfolio = analyze_portfolio(positions)
+    
+    # Get market data
+    market_snapshot = get_market_snapshot()
+    
+    # Build market summary
+    market = {
+        'risk_env': market_snapshot.get('internals', {}).get('risk_environment', 'NEUTRAL'),
+        'vix': market_snapshot.get('vix', {}).get('vix', 15),
+        'vix_regime': market_snapshot.get('vix', {}).get('regime', 'NORMAL'),
+        'trend': market_snapshot.get('spy', {}).get('trend', 'NEUTRAL'),
+        'breadth': market_snapshot.get('internals', {}).get('breadth', 'MIXED')
+    }
+    
+    # Calculate energy score (0-100)
+    energy_score = market_snapshot.get('internals', {}).get('risk_score', 50)
+    energy_position = energy_score  # Position on the gauge
+    
+    # Build indices data
+    indices = [
+        {'symbol': 'SPY', 'price': market_snapshot.get('spy', {}).get('price', 0), 
+         'change_pct': market_snapshot.get('spy', {}).get('change_pct', 0),
+         'strength': 50 + market_snapshot.get('spy', {}).get('change_pct', 0) * 20},
+        {'symbol': 'QQQ', 'price': 0, 'change_pct': market_snapshot.get('internals', {}).get('qqq_change', 0),
+         'strength': 50 + market_snapshot.get('internals', {}).get('qqq_change', 0) * 20},
+        {'symbol': 'VIX', 'price': market_snapshot.get('vix', {}).get('vix', 15), 
+         'change_pct': market_snapshot.get('vix', {}).get('change_pct', 0),
+         'strength': max(0, 100 - market_snapshot.get('vix', {}).get('vix', 15) * 3)},
+        {'symbol': 'IWM', 'price': 0, 'change_pct': market_snapshot.get('internals', {}).get('iwm_change', 0),
+         'strength': 50 + market_snapshot.get('internals', {}).get('iwm_change', 0) * 20}
+    ]
+    
+    # Get sectors
+    sectors = market_snapshot.get('sectors', [])[:11]
+    
+    # Get top setups
+    ready_now = categorized.get('READY_NOW', [])
+    top_setups = sorted(ready_now, key=lambda x: x.get('priority_score', 0), reverse=True)[:3]
+    
+    # Get news
+    news = get_market_news(5)
+    
+    # Build alerts
+    alerts = []
+    if portfolio:
+        for h in portfolio.get('heat_map', []):
+            if h.get('health') == 'WEAK':
+                alerts.append({'icon': '🔴', 'color': '#ff5252', 'message': f"{h['symbol']} health WEAK - review position"})
+            if h.get('pnl_percent', 0) <= -40:
+                alerts.append({'icon': '🔴', 'color': '#ff5252', 'message': f"{h['symbol']} near stop ({h['pnl_percent']:.0f}%)"})
+    
+    for setup in ready_now[:2]:
+        alerts.append({'icon': '🟢', 'color': '#00c853', 'message': f"{setup['symbol']} {setup['tier']}-tier ready - exec {setup['exec_readiness']}/14"})
+    
+    # Get briefing
+    briefing = settings_get('daily_briefing')
+    
+    return render_template_string(HTML,
+        tab='dashboard',
+        market=market,
+        energy_score=energy_score,
+        energy_position=energy_position,
+        indices=indices,
+        sectors=sectors,
+        portfolio=portfolio,
+        scan_stats=scan_stats,
+        top_setups=top_setups,
+        news=news,
+        alerts=alerts,
+        stats=stats,
+        briefing=briefing,
+        categorized=categorized,
+        is_market_open=is_market_hours(),
+        ready_count=len(ready_now),
+        position_count=len(positions))
+
+@app.route('/scanner')
+def scanner_view():
+    """Scanner tab - find setups"""
     categorized = get_results_by_category()
     scan_stats = get_scan_stats()
     positions = position_get_all('OPEN')
