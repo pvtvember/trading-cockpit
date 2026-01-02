@@ -201,7 +201,11 @@ HTML = '''
         .modal-close{background:none;border:none;color:#888;font-size:1.8em;cursor:pointer;padding:5px}
         .form-group{margin-bottom:12px}
         .form-group label{display:block;margin-bottom:5px;color:#888;font-size:0.85em}
-        .form-group input,.form-group select,.form-group textarea{width:100%;padding:12px;border:1px solid rgba(255,255,255,0.2);border-radius:8px;background:rgba(255,255,255,0.05);color:white;font-size:1em}
+        .form-group input,.form-group select,.form-group textarea{width:100%;padding:12px;border:1px solid rgba(255,255,255,0.2);border-radius:8px;background:#1a1a2e;color:white;font-size:1em;-webkit-appearance:none;appearance:none}
+        .form-group select{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%23888' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10l-5 5z'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 12px center;padding-right:36px}
+        .form-group select option{background:#1a1a2e;color:white}
+        .form-group input::placeholder{color:#666}
+        .form-group input:focus,.form-group select:focus{outline:none;border-color:#00d4ff}
         
         /* AI Advisor specific */
         .ai-section{background:rgba(0,0,0,0.2);border-radius:10px;padding:14px;margin-bottom:12px}
@@ -645,9 +649,12 @@ HTML = '''
         <div class="modal-content">
             <div class="modal-header"><h3>Add to Watchlist</h3><button class="modal-close" onclick="closeModal('add-watchlist')">×</button></div>
             <form action="/add-watchlist" method="POST">
-                <div class="form-group"><label>Symbol</label><input type="text" name="symbol" required autocapitalize="characters" autocomplete="off"></div>
-                <div class="form-group"><label>Sector</label><select name="sector"><option value="">Select...</option><option>Technology</option><option>Healthcare</option><option>Financials</option><option>Consumer</option><option>Energy</option></select></div>
-                <button type="submit" class="btn btn-primary" style="width:100%;margin-top:10px;">Add</button>
+                <div class="form-group">
+                    <label>Stock Symbol</label>
+                    <input type="text" name="symbol" required autocapitalize="characters" autocomplete="off" placeholder="AAPL, TSLA, NVDA..." style="text-transform:uppercase">
+                </div>
+                <p style="color:#888;font-size:0.8em;margin-bottom:15px;">Sector and other data will be auto-detected</p>
+                <button type="submit" class="btn btn-primary" style="width:100%;">Add Stock</button>
             </form>
         </div>
     </div>
@@ -727,12 +734,43 @@ def analyze(symbol):
 
 @app.route('/add-watchlist', methods=['POST'])
 def add_watchlist():
-    symbol = request.form.get('symbol', '').upper()
-    sector = request.form.get('sector', '')
-    if symbol: 
+    symbol = request.form.get('symbol', '').upper().strip()
+    if symbol:
+        # Auto-detect sector based on common stocks
+        sector_map = {
+            # Technology
+            'AAPL': 'Technology', 'MSFT': 'Technology', 'GOOGL': 'Technology', 'GOOG': 'Technology',
+            'META': 'Technology', 'NVDA': 'Technology', 'AMD': 'Technology', 'INTC': 'Technology',
+            'CRM': 'Technology', 'ADBE': 'Technology', 'ORCL': 'Technology', 'CSCO': 'Technology',
+            'AVGO': 'Technology', 'TXN': 'Technology', 'QCOM': 'Technology', 'MU': 'Technology',
+            'NFLX': 'Technology', 'TSLA': 'Technology', 'UBER': 'Technology', 'LYFT': 'Technology',
+            # Healthcare
+            'JNJ': 'Healthcare', 'UNH': 'Healthcare', 'PFE': 'Healthcare', 'ABBV': 'Healthcare',
+            'MRK': 'Healthcare', 'LLY': 'Healthcare', 'TMO': 'Healthcare', 'ABT': 'Healthcare',
+            'BMY': 'Healthcare', 'AMGN': 'Healthcare', 'GILD': 'Healthcare', 'MRNA': 'Healthcare',
+            # Financials
+            'JPM': 'Financials', 'BAC': 'Financials', 'WFC': 'Financials', 'GS': 'Financials',
+            'MS': 'Financials', 'C': 'Financials', 'BLK': 'Financials', 'SCHW': 'Financials',
+            'AXP': 'Financials', 'V': 'Financials', 'MA': 'Financials', 'PYPL': 'Financials',
+            # Consumer
+            'AMZN': 'Consumer', 'WMT': 'Consumer', 'HD': 'Consumer', 'NKE': 'Consumer',
+            'MCD': 'Consumer', 'SBUX': 'Consumer', 'TGT': 'Consumer', 'COST': 'Consumer',
+            'DIS': 'Consumer', 'CMCSA': 'Consumer', 'PEP': 'Consumer', 'KO': 'Consumer',
+            # Energy
+            'XOM': 'Energy', 'CVX': 'Energy', 'COP': 'Energy', 'SLB': 'Energy',
+            'EOG': 'Energy', 'OXY': 'Energy', 'PSX': 'Energy', 'VLO': 'Energy',
+            # Industrial
+            'CAT': 'Industrial', 'BA': 'Industrial', 'HON': 'Industrial', 'UPS': 'Industrial',
+            'DE': 'Industrial', 'GE': 'Industrial', 'MMM': 'Industrial', 'LMT': 'Industrial',
+            # ETFs
+            'SPY': 'ETF', 'QQQ': 'ETF', 'IWM': 'ETF', 'DIA': 'ETF', 'VTI': 'ETF',
+            'XLF': 'ETF', 'XLE': 'ETF', 'XLK': 'ETF', 'ARKK': 'ETF', 'GLD': 'ETF',
+        }
+        sector = sector_map.get(symbol, 'Other')
+        
         scanner.add_to_watchlist(symbol, '', sector, '')
         # Save to database
-        stored_watchlist[symbol] = scanner.watchlist.get(symbol, {'symbol': symbol, 'sector': sector})
+        stored_watchlist[symbol] = {'symbol': symbol, 'sector': sector}
         save_watchlist()
     return redirect(url_for('scanner_tab'))
 
