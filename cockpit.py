@@ -6,6 +6,7 @@ Mobile + Web responsive dashboard with AI Advisor
 
 import os
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from flask import Flask, render_template_string, request, redirect, url_for, jsonify
@@ -26,6 +27,23 @@ except:
 
 load_dotenv()
 app = Flask(__name__)
+
+# ========== CACHING FOR SPEED ==========
+_cache = {}
+_cache_expiry = {}
+
+def cache_get(key):
+    """Get cached value if not expired"""
+    if key in _cache and time.time() < _cache_expiry.get(key, 0):
+        return _cache[key]
+    return None
+
+def cache_set(key, value, ttl=60):
+    """Cache value with TTL in seconds"""
+    _cache[key] = value
+    _cache_expiry[key] = time.time() + ttl
+
+# ========================================
 
 api_key = os.getenv('POLYGON_API_KEY', '')
 anthropic_key = os.getenv('ANTHROPIC_API_KEY', '')
@@ -617,7 +635,17 @@ HTML = '''
 </html>
 '''
 
-def get_data():
+def get_data(force_refresh=False):
+    """Get all data with caching (60 second TTL)"""
+    cache_key = 'page_data'
+    
+    # Return cached if available and not forcing refresh
+    if not force_refresh:
+        cached = cache_get(cache_key)
+        if cached:
+            return cached
+    
+    # Fetch fresh data
     market = get_market_snapshot_dict(api)
     positions = {}
     pos_list = []
@@ -637,7 +665,11 @@ def get_data():
         hot_list = get_hot_list_data(scanner).get('hot_list', [])
     except:
         hot_list = []
-    return market, positions, portfolio, journal_data, total_pnl, hot_list
+    
+    # Cache the result for 60 seconds
+    result = (market, positions, portfolio, journal_data, total_pnl, hot_list)
+    cache_set(cache_key, result, 60)
+    return result
 
 @app.route('/')
 def dashboard():
@@ -684,6 +716,69 @@ def positions_tab():
     market, positions, portfolio, journal_data, total_pnl, hot_list = get_data()
     return render_template_string(HTML, tab='positions', market=market, positions=positions, portfolio=portfolio, journal_data=journal_data, total_pnl=total_pnl, hot_list=hot_list, hot_count=len(hot_list), watchlist=list(scanner.watchlist.values()))
 
+@app.route('/add', methods=['GET', 'POST'])
+def add_position():
+    if request.method == 'POST':
+        try:
+            symbol = request.form.get('symbol', '').upper()
+            pos_type = request.form.get('type', 'LONG_CALL')
+            strike = float(request.form.get('strike', 0))
+            expiration = request.form.get('expiration', '')
+            contracts = int(request.form.get('contracts', 1))
+            entry_price = float(request.form.get('entry_price', 0))
+            
+            if symbol and strike and entry_price and manager:
+                from pro_manager import Position, PositionType
+                ptype = PositionType.LONG_CALL if 'CALL' in pos_type else PositionType.LONG_PUT
+                pos = Position(
+                    symbol=symbol,
+                    position_type=ptype,
+                    strike=strike,
+                    expiration=expiration,
+                    contracts=contracts,
+                    entry_option_price=entry_price
+                )
+                manager.add_position(pos)
+            return redirect(url_for('positions_tab'))
+        except Exception as e:
+            print(f"Add position error: {e}")
+            return redirect(url_for('positions_tab'))
+    
+    # GET - show form
+    add_form = '''
+    <!DOCTYPE html><html><head>
+    <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Add Position</title>
+    <style>
+        *{margin:0;padding:0;box-sizing:border-box}
+        body{font-family:-apple-system,sans-serif;background:#0a0a12;color:#e0e0e0;min-height:100vh;padding:20px}
+        .container{max-width:500px;margin:0 auto}
+        h1{margin-bottom:20px;color:#00d4ff}
+        .form-group{margin-bottom:15px}
+        label{display:block;margin-bottom:5px;color:#888}
+        input,select{width:100%;padding:12px;border:1px solid rgba(255,255,255,0.2);border-radius:8px;background:rgba(255,255,255,0.05);color:white;font-size:1em}
+        .btn{padding:12px 24px;border:none;border-radius:8px;cursor:pointer;font-weight:600;margin-right:10px}
+        .btn-primary{background:linear-gradient(135deg,#00d4ff,#0099cc);color:white}
+        .btn-secondary{background:rgba(255,255,255,0.1);color:white;text-decoration:none;display:inline-block}
+    </style>
+    </head><body>
+    <div class="container">
+        <h1>➕ Add Position</h1>
+        <form method="POST">
+            <div class="form-group"><label>Symbol</label><input type="text" name="symbol" required placeholder="AAPL" style="text-transform:uppercase"></div>
+            <div class="form-group"><label>Type</label><select name="type"><option value="LONG_CALL">Long Call</option><option value="LONG_PUT">Long Put</option></select></div>
+            <div class="form-group"><label>Strike Price</label><input type="number" name="strike" step="0.5" required placeholder="150"></div>
+            <div class="form-group"><label>Expiration</label><input type="date" name="expiration" required></div>
+            <div class="form-group"><label>Contracts</label><input type="number" name="contracts" value="1" min="1"></div>
+            <div class="form-group"><label>Entry Price (per contract)</label><input type="number" name="entry_price" step="0.01" required placeholder="3.50"></div>
+            <button type="submit" class="btn btn-primary">Add Position</button>
+            <a href="/positions" class="btn btn-secondary">Cancel</a>
+        </form>
+    </div>
+    </body></html>
+    '''
+    return add_form
+
 @app.route('/market')
 def market_tab():
     market, positions, portfolio, journal_data, total_pnl, hot_list = get_data()
@@ -701,6 +796,10 @@ def journal_tab():
 
 @app.route('/refresh')
 def refresh():
+    # Clear cache to force fresh data
+    global _cache, _cache_expiry
+    _cache = {}
+    _cache_expiry = {}
     if manager and api: manager.update_all()
     return redirect(request.referrer or url_for('dashboard'))
 
