@@ -449,12 +449,15 @@ def analyze_time(entry_date: datetime, dte: int, tier: str = 'B',
     hold_estimates = {
         'A': {'CONTINUATION': 7, 'BASE_BREAKOUT': 10, 'SQUEEZE': 5},
         'B': {'SQUEEZE': 7, 'BREAKOUT': 5, 'CONTINUATION': 8},
-        'C': {'REVERSAL': 3, 'DIVERGENCE': 5}
+        'C': {'REVERSAL': 3, 'DIVERGENCE': 5},
+        'D': {'DISCRETIONARY': 7, 'SQUEEZE': 7, 'BREAKOUT': 5, 'MOMENTUM': 5, 'CONTINUATION': 7}  # Discretionary
     }
     
     default_hold = 7
     if tier in hold_estimates and setup_type in hold_estimates[tier]:
         ai_hold = hold_estimates[tier][setup_type]
+    elif tier == 'D':
+        ai_hold = 7  # Default for discretionary
     else:
         ai_hold = default_hold
     

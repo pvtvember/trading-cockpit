@@ -166,12 +166,82 @@ def init_database():
         conn.commit()
         cur.close()
         conn.close()
+        
+        # Populate default watchlist if empty
+        _populate_default_watchlist()
+        
         print("Database initialized successfully")
         return True
         
     except Exception as e:
         print(f"Database initialization error: {e}")
         return False
+
+
+def _populate_default_watchlist():
+    """Add default high-liquidity options stocks to watchlist if empty"""
+    # Check if watchlist is empty
+    existing = watchlist_get_all()
+    if existing:
+        return  # Already has symbols
+    
+    # High liquidity options stocks - excellent for swing trading
+    DEFAULT_WATCHLIST = [
+        # Mega Cap Tech - Ultra Liquid
+        ('AAPL', 'Technology'),
+        ('MSFT', 'Technology'),
+        ('NVDA', 'Technology'),
+        ('GOOGL', 'Technology'),
+        ('AMZN', 'Consumer'),
+        ('META', 'Technology'),
+        ('TSLA', 'Consumer'),
+        
+        # Semiconductor - High Beta
+        ('AMD', 'Technology'),
+        ('INTC', 'Technology'),
+        ('MU', 'Technology'),
+        ('QCOM', 'Technology'),
+        
+        # Software/Cloud
+        ('CRM', 'Technology'),
+        ('NOW', 'Technology'),
+        ('ADBE', 'Technology'),
+        
+        # Financials
+        ('JPM', 'Financials'),
+        ('BAC', 'Financials'),
+        ('GS', 'Financials'),
+        
+        # Consumer/Retail
+        ('NFLX', 'Communication'),
+        ('DIS', 'Communication'),
+        ('NKE', 'Consumer'),
+        ('SBUX', 'Consumer'),
+        
+        # Chinese Tech - High Volatility
+        ('BABA', 'Technology'),
+        ('BIDU', 'Technology'),
+        ('JD', 'Consumer'),
+        ('PDD', 'Consumer'),
+        
+        # Social Media
+        ('SNAP', 'Communication'),
+        ('PINS', 'Communication'),
+        
+        # Energy - For Rotation
+        ('XOM', 'Energy'),
+        ('CVX', 'Energy'),
+        
+        # ETFs - For Market Plays
+        ('SPY', 'Index'),
+        ('QQQ', 'Index'),
+        ('IWM', 'Index'),
+    ]
+    
+    for symbol, sector in DEFAULT_WATCHLIST:
+        watchlist_add(symbol, sector, 'Default - High liquidity options')
+    
+    print(f"Populated default watchlist with {len(DEFAULT_WATCHLIST)} symbols")
 
 # ============================================================================
 # WATCHLIST OPERATIONS
