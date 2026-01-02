@@ -300,3 +300,10 @@ if __name__ == "__main__":
         print(briefing.risk_advisory)
     else:
         print("No API key configured")
+
+
+# ============== BACKWARDS COMPATIBILITY ==============
+# These aliases ensure the new file works with existing cockpit.py
+
+AITradingAdvisor = ExpertAdvisor  # Alias for backwards compatibility
+
