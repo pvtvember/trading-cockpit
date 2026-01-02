@@ -1,1260 +1,610 @@
 """
-Trading Cockpit v2 - Deployment Ready
+Trading Cockpit v4 - Main Application
 ======================================
-Mobile + Web responsive dashboard with AI Advisor
+Swing Options Execution System with AI Mentor
 """
 
 import os
-import sys
-import time
 from datetime import datetime
-from pathlib import Path
 from flask import Flask, render_template_string, request, redirect, url_for, jsonify
 from dotenv import load_dotenv
 
-from market_regime import get_market_snapshot_dict
-from portfolio_risk import get_portfolio_risk_dict
-from trade_journal import TradeJournal, get_journal_dict
-from scanner import SmartScanner, get_scanner_data, get_hot_list_data, get_stock_analysis_data
-from ai_advisor import AITradingAdvisor, get_advisor_briefing_dict
-
-try:
-    from pro_manager import ProfessionalTradeManager, PolygonAPI, Position, PositionType
-    from smart_analyzer import get_recommendation_dict
-    HAS_MANAGER = True
-except:
-    HAS_MANAGER = False
-
 load_dotenv()
+
+from db import (
+    init_database, watchlist_add, watchlist_remove, watchlist_get_all,
+    position_add, position_update, position_close, position_get_all, position_get,
+    journal_get_all, journal_get_statistics, journal_update_review,
+    settings_get, settings_set
+)
+from scanner import (
+    scan_watchlist, get_cached_results, get_results_by_category,
+    quick_scan_symbol, start_scanner, get_scan_stats, is_market_hours
+)
+from mentor import (
+    review_trade, analyze_patterns, get_entry_advice, 
+    get_exit_advice, generate_daily_briefing
+)
+from position_manager import analyze_position, analyze_portfolio
+from market_monitor import get_market_snapshot, get_position_market_context
+from news_service import get_position_news_summary
+from positions_template import POSITIONS_HTML
+
 app = Flask(__name__)
 
-# ========== CACHING FOR SPEED ==========
-_cache = {}
-_cache_expiry = {}
-
-def cache_get(key):
-    """Get cached value if not expired"""
-    if key in _cache and time.time() < _cache_expiry.get(key, 0):
-        return _cache[key]
-    return None
-
-def cache_set(key, value, ttl=60):
-    """Cache value with TTL in seconds"""
-    _cache[key] = value
-    _cache_expiry[key] = time.time() + ttl
-
-# ========================================
-
-# ========== DATABASE-BACKED STORAGE ==========
-from db import db_load, db_save
-
-# Load positions from database on startup
-stored_positions = db_load('positions', {})
-stored_watchlist = db_load('watchlist', {})
-stored_journal = db_load('journal', [])
-
-def save_positions():
-    """Save positions to database"""
-    db_save('positions', stored_positions)
-
-def save_watchlist():
-    """Save watchlist to database"""
-    db_save('watchlist', stored_watchlist)
-
-def save_journal():
-    """Save journal to database"""
-    db_save('journal', stored_journal)
-
-# =============================================
-
-api_key = os.getenv('POLYGON_API_KEY', '')
-anthropic_key = os.getenv('ANTHROPIC_API_KEY', '')
-api = None
-manager = None
-
-if api_key and HAS_MANAGER:
-    try:
-        api = PolygonAPI(api_key)
-        manager = ProfessionalTradeManager(api)
-    except Exception as e:
-        print(f"Manager init error: {e}")
-
-journal = TradeJournal()
-scanner = SmartScanner(api, anthropic_key)
-
-# Load watchlist from database into scanner
-if stored_watchlist:
-    scanner.watchlist = stored_watchlist
-
-claude_model = os.getenv('CLAUDE_MODEL', 'claude-sonnet-4-20250514')
-advisor = AITradingAdvisor(anthropic_key, claude_model)
-
 CAPITAL = float(os.getenv('TOTAL_CAPITAL', 100000))
+
+init_database()
+start_scanner()
 
 HTML = '''
 <!DOCTYPE html>
 <html>
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <meta name="apple-mobile-web-app-capable" content="yes">
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="theme-color" content="#0a0a12">
-    <title>Trading Cockpit</title>
-    <link rel="manifest" href="/manifest.json">
+    <title>Trading Cockpit v4</title>
     <style>
-        *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-        html{font-size:16px}
-        body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0a0a12;color:#e0e0e0;min-height:100vh;min-height:-webkit-fill-available;padding-bottom:70px}
-        
-        /* Mobile-first navigation */
-        .nav{background:linear-gradient(135deg,#12121f,#1a1a2e);padding:12px 15px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid rgba(255,255,255,0.1);position:sticky;top:0;z-index:100}
-        .nav-brand{font-size:1.1em;font-weight:700;background:linear-gradient(90deg,#00d4ff,#7b2cbf);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
-        .nav-refresh{background:rgba(0,212,255,0.2);border:none;padding:8px 12px;border-radius:6px;color:#00d4ff;font-size:0.85em}
-        
-        /* Bottom tab bar for mobile */
-        .tab-bar{display:none;position:fixed;bottom:0;left:0;right:0;background:#12121f;border-top:1px solid rgba(255,255,255,0.1);padding:8px 0;padding-bottom:max(8px,env(safe-area-inset-bottom));z-index:100}
-        .tab-bar-inner{display:flex;justify-content:space-around;max-width:500px;margin:0 auto}
-        .tab-item{display:flex;flex-direction:column;align-items:center;text-decoration:none;color:#666;font-size:0.7em;padding:4px 8px}
-        .tab-item.active{color:#00d4ff}
-        .tab-icon{font-size:1.4em;margin-bottom:2px}
-        
-        /* Desktop tabs */
-        .nav-tabs{display:flex;gap:5px}
-        .nav-tab{padding:8px 14px;background:rgba(255,255,255,0.05);border:none;border-radius:6px;color:#888;cursor:pointer;font-size:0.8em;text-decoration:none;white-space:nowrap}
-        .nav-tab:hover{background:rgba(255,255,255,0.1);color:#fff}
-        .nav-tab.active{background:rgba(0,212,255,0.2);color:#00d4ff}
-        
-        /* Core components */
-        .btn{padding:10px 18px;border:none;border-radius:8px;cursor:pointer;font-size:0.9em;font-weight:600;text-decoration:none;display:inline-block;touch-action:manipulation}
+        *{margin:0;padding:0;box-sizing:border-box}
+        body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:linear-gradient(135deg,#0a0a12,#1a1a2e);color:#e0e0e0;min-height:100vh;padding-bottom:70px}
+        .header{background:rgba(0,0,0,0.4);padding:12px 15px;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;z-index:100;backdrop-filter:blur(10px)}
+        .logo{font-weight:700;font-size:1.1em}.logo span{color:#00d4ff}
+        .market-status{padding:4px 10px;border-radius:12px;font-size:0.75em;font-weight:600}
+        .market-open{background:rgba(0,200,83,0.2);color:#00c853}
+        .market-closed{background:rgba(255,82,82,0.2);color:#ff5252}
+        .nav{display:flex;gap:5px;padding:10px 15px;overflow-x:auto}
+        .nav-item{padding:8px 16px;border-radius:20px;background:rgba(255,255,255,0.05);color:#888;text-decoration:none;font-size:0.85em;font-weight:500;white-space:nowrap}
+        .nav-item:hover{background:rgba(255,255,255,0.1);color:#fff}
+        .nav-item.active{background:linear-gradient(135deg,#00d4ff,#0099cc);color:white}
+        .nav-badge{background:#ff5252;color:white;font-size:0.7em;padding:2px 6px;border-radius:10px;margin-left:5px}
+        .container{padding:15px;max-width:1400px;margin:0 auto}
+        .card{background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:12px;margin-bottom:12px;overflow:hidden}
+        .card-header{padding:12px 15px;background:rgba(0,0,0,0.2);font-weight:600;font-size:0.9em;display:flex;justify-content:space-between;align-items:center}
+        .card-body{padding:15px}
+        .category-header{display:flex;align-items:center;gap:10px;padding:15px;margin-bottom:10px;border-radius:10px}
+        .category-ready{background:linear-gradient(135deg,rgba(0,200,83,0.15),rgba(0,200,83,0.05));border-left:4px solid #00c853}
+        .category-setting{background:linear-gradient(135deg,rgba(0,188,212,0.15),rgba(0,188,212,0.05));border-left:4px solid #00bcd4}
+        .category-building{background:linear-gradient(135deg,rgba(255,193,7,0.15),rgba(255,193,7,0.05));border-left:4px solid #ffc107}
+        .category-avoid{background:linear-gradient(135deg,rgba(255,82,82,0.15),rgba(255,82,82,0.05));border-left:4px solid #ff5252}
+        .category-icon{font-size:1.5em}.category-title{font-weight:700;font-size:1.1em}.category-count{color:#888;font-size:0.85em}
+        .setup-card{background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:15px;margin-bottom:12px}
+        .setup-card.tier-a{border-left:4px solid #00c853}
+        .setup-card.tier-b{border-left:4px solid #00bcd4}
+        .setup-card.tier-c{border-left:4px solid #ff9800}
+        .setup-header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px}
+        .setup-symbol{font-size:1.3em;font-weight:700;color:#00d4ff}
+        .setup-price{color:#888;font-size:0.9em;margin-left:10px}
+        .setup-tier{font-size:1.2em;font-weight:700;padding:4px 12px;border-radius:8px}
+        .tier-a-badge{background:rgba(0,200,83,0.2);color:#00c853}
+        .tier-b-badge{background:rgba(0,188,212,0.2);color:#00bcd4}
+        .tier-c-badge{background:rgba(255,152,0,0.2);color:#ff9800}
+        .setup-type{display:inline-block;padding:4px 10px;border-radius:4px;font-size:0.8em;font-weight:600;margin-bottom:10px}
+        .setup-call{background:rgba(0,200,83,0.15);color:#00c853}
+        .setup-put{background:rgba(255,82,82,0.15);color:#ff5252}
+        .setup-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:12px}
+        .metric{background:rgba(0,0,0,0.2);padding:10px;border-radius:8px;text-align:center}
+        .metric-label{font-size:0.7em;color:#888;margin-bottom:4px}
+        .metric-value{font-weight:600;font-size:0.95em}
+        .setup-analysis{background:rgba(123,44,191,0.1);border-radius:8px;padding:12px;margin-bottom:12px}
+        .analysis-row{display:flex;justify-content:space-between;padding:4px 0;font-size:0.85em}
+        .analysis-label{color:#888}
+        .contract-box{background:linear-gradient(135deg,rgba(0,212,255,0.1),rgba(0,212,255,0.02));border:1px solid rgba(0,212,255,0.2);border-radius:10px;padding:15px;margin-bottom:12px}
+        .contract-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+        .contract-title{font-size:0.8em;color:#00d4ff;font-weight:600}
+        .contract-strike{font-size:1.2em;font-weight:700}
+        .contract-details{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;font-size:0.85em}
+        .contract-detail{display:flex;justify-content:space-between}
+        .contract-detail-label{color:#888}
+        .warnings{background:rgba(255,193,7,0.1);border-radius:8px;padding:10px;font-size:0.85em}
+        .warning-item{color:#ffc107;padding:4px 0}
+        .btn{padding:10px 20px;border:none;border-radius:8px;font-weight:600;cursor:pointer;text-decoration:none;display:inline-block;font-size:0.9em}
         .btn-primary{background:linear-gradient(135deg,#00d4ff,#0099cc);color:white}
-        .btn-secondary{background:rgba(255,255,255,0.1);color:white}
-        .btn-sm{padding:8px 14px;font-size:0.85em}
-        .btn-danger{background:#ff5252;color:white}
-        .container{max-width:1400px;margin:0 auto;padding:12px}
-        .grid{display:grid;grid-template-columns:1fr;gap:12px}
-        .card{background:rgba(255,255,255,0.03);border-radius:12px;border:1px solid rgba(255,255,255,0.08);overflow:hidden}
-        .card-header{padding:14px 16px;border-bottom:1px solid rgba(255,255,255,0.08);font-weight:600;font-size:0.95em;display:flex;justify-content:space-between;align-items:center}
-        .card-body{padding:16px}
-        
-        /* Banner */
-        .banner{background:linear-gradient(135deg,rgba(0,212,255,0.1),rgba(123,44,191,0.1));border:2px solid rgba(0,212,255,0.3);border-radius:12px;padding:16px;margin-bottom:12px}
-        .banner-headline{font-size:1.2em;font-weight:700;margin-bottom:4px;line-height:1.3}
-        .banner-sub{color:#aaa;font-size:0.85em}
-        
-        /* Stats grid */
-        .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:12px}
-        .stat{background:rgba(0,0,0,0.3);padding:10px 8px;border-radius:8px;text-align:center}
-        .stat-label{font-size:0.6em;color:#888;text-transform:uppercase;letter-spacing:0.5px}
-        .stat-value{font-size:1.2em;font-weight:700;margin-top:2px}
-        
-        /* Rows */
-        .row{display:flex;justify-content:space-between;padding:8px 0;font-size:0.9em;border-bottom:1px solid rgba(255,255,255,0.05)}
-        .row:last-child{border-bottom:none}
-        .label{color:#888}
-        
-        /* Colors */
-        .green{color:#00c853}.red{color:#ff5252}.yellow{color:#ffc107}.orange{color:#ff9800}.blue{color:#00d4ff}.purple{color:#7b2cbf}
-        
-        /* Boxes */
-        .rec-box{background:rgba(0,0,0,0.3);border-radius:8px;padding:12px;margin-top:10px}
-        .rec-title{font-size:0.75em;color:#00d4ff;margin-bottom:8px;text-transform:uppercase}
-        .rec-item{padding:4px 0;font-size:0.9em;padding-left:18px;position:relative}
-        .rec-item:before{content:"→";position:absolute;left:0;color:#00c853}
-        
-        /* Gauge */
-        .gauge{background:rgba(255,255,255,0.1);border-radius:4px;height:8px;margin-top:5px;overflow:hidden}
-        .gauge-fill{height:100%;border-radius:4px}
-        .g-green{background:linear-gradient(90deg,#00c853,#69f0ae)}
-        .g-yellow{background:linear-gradient(90deg,#ffc107,#ffca28)}
-        .g-red{background:linear-gradient(90deg,#f44336,#e57373)}
-        
-        /* Warning */
-        .warn{background:rgba(255,152,0,0.1);border-left:3px solid #ff9800;padding:12px;border-radius:0 8px 8px 0;margin-top:10px;font-size:0.9em}
-        
-        /* Hot List */
-        .hot-item{background:rgba(255,255,255,0.02);border-radius:10px;padding:14px;margin-bottom:10px;border-left:4px solid transparent}
-        .hot-item.a-plus{border-left-color:#00c853}
-        .hot-item.a{border-left-color:#69f0ae}
-        .hot-item.b{border-left-color:#ffc107}
-        .hot-item.c{border-left-color:#888}
-        .hot-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;flex-wrap:wrap;gap:8px}
-        .hot-rank{font-size:1.4em;font-weight:700;color:#00d4ff;margin-right:8px}
-        .hot-symbol{font-size:1.1em;font-weight:700}
-        .hot-score{background:rgba(0,212,255,0.2);padding:4px 10px;border-radius:4px;font-weight:600;font-size:0.85em}
-        .hot-details{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-top:10px}
-        .hot-detail{font-size:0.85em}
-        .hot-action{background:rgba(0,200,83,0.15);padding:12px;border-radius:8px;margin-top:10px}
-        .hot-action-title{font-weight:600;color:#00c853;margin-bottom:5px;font-size:0.9em}
-        
-        /* Watchlist */
-        .wl-item{display:flex;justify-content:space-between;align-items:center;padding:12px;background:rgba(255,255,255,0.02);border-radius:8px;margin-bottom:8px}
-        .wl-symbol{font-weight:700}
-        .wl-actions{display:flex;gap:8px}
-        
-        /* Modal */
-        .modal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.9);z-index:1000;justify-content:center;align-items:flex-end;padding:0}
+        .btn-success{background:linear-gradient(135deg,#00c853,#009624);color:white}
+        .btn-danger{background:linear-gradient(135deg,#ff5252,#d32f2f);color:white}
+        .btn-secondary{background:rgba(255,255,255,0.1);color:#e0e0e0}
+        .btn-sm{padding:6px 12px;font-size:0.8em}
+        .stats-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:15px}
+        .stat-card{background:rgba(255,255,255,0.03);border-radius:10px;padding:15px;text-align:center}
+        .stat-value{font-size:1.5em;font-weight:700}
+        .stat-label{font-size:0.75em;color:#888;margin-top:4px}
+        .journal-table{width:100%;border-collapse:collapse;font-size:0.85em}
+        .journal-table th{text-align:left;padding:10px;background:rgba(0,0,0,0.3);color:#888;font-weight:500}
+        .journal-table td{padding:12px 10px;border-bottom:1px solid rgba(255,255,255,0.05)}
+        .mentor-card{background:linear-gradient(135deg,rgba(123,44,191,0.1),rgba(123,44,191,0.02));border:1px solid rgba(123,44,191,0.2)}
+        .mentor-insight{padding:15px;border-bottom:1px solid rgba(255,255,255,0.05)}
+        .mentor-insight-title{font-weight:600;color:#7b2cbf;margin-bottom:8px;font-size:0.9em}
+        .form-group{margin-bottom:15px}
+        .form-group label{display:block;margin-bottom:6px;color:#888;font-size:0.85em}
+        .form-group input,.form-group select{width:100%;padding:12px;border:1px solid rgba(255,255,255,0.1);border-radius:8px;background:rgba(0,0,0,0.3);color:white;font-size:1em}
+        .modal{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.8);z-index:1000;align-items:center;justify-content:center;padding:20px}
         .modal.active{display:flex}
-        .modal-content{background:#1a1a2e;border-radius:20px 20px 0 0;padding:20px;width:100%;max-height:90vh;overflow-y:auto;animation:slideUp 0.3s ease}
-        @keyframes slideUp{from{transform:translateY(100%)}to{transform:translateY(0)}}
-        .modal-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:15px;padding-bottom:15px;border-bottom:1px solid rgba(255,255,255,0.1)}
-        .modal-close{background:none;border:none;color:#888;font-size:1.8em;cursor:pointer;padding:5px}
-        .form-group{margin-bottom:12px}
-        .form-group label{display:block;margin-bottom:5px;color:#888;font-size:0.85em}
-        .form-group input,.form-group select,.form-group textarea{width:100%;padding:12px;border:1px solid rgba(255,255,255,0.2);border-radius:8px;background:#1a1a2e;color:white;font-size:1em;-webkit-appearance:none;appearance:none}
-        .form-group select{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%23888' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10l-5 5z'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 12px center;padding-right:36px}
-        .form-group select option{background:#1a1a2e;color:white}
-        .form-group input::placeholder{color:#666}
-        .form-group input:focus,.form-group select:focus{outline:none;border-color:#00d4ff}
-        
-        /* AI Advisor specific */
-        .ai-section{background:rgba(0,0,0,0.2);border-radius:10px;padding:14px;margin-bottom:12px}
-        .ai-section-title{font-weight:600;margin-bottom:10px;font-size:0.9em;color:#00d4ff}
-        .action-item{padding:8px 0;padding-left:20px;position:relative;font-size:0.9em}
-        .action-item:before{content:"→";position:absolute;left:0;color:#00c853}
-        .warning-item{padding:6px 0;color:#ff5252;font-size:0.9em}
-        
-        /* Desktop styles */
-        @media(min-width:768px){
-            .tab-bar{display:none!important}
-            .nav-tabs{display:flex!important}
-            .grid{grid-template-columns:repeat(2,1fr)}
-            .container{padding:20px}
-            .stats{grid-template-columns:repeat(6,1fr)}
-            .hot-details{grid-template-columns:repeat(3,1fr)}
-            .modal-content{max-width:500px;border-radius:16px;margin:auto}
-            .banner-headline{font-size:1.5em}
-            body{padding-bottom:0}
-        }
-        
-        @media(min-width:1200px){
-            .grid{grid-template-columns:repeat(3,1fr)}
-            .hot-details{grid-template-columns:repeat(6,1fr)}
-        }
-        
-        /* Mobile styles */
-        @media(max-width:767px){
-            .nav-tabs{display:none!important}
-            .tab-bar{display:block!important}
-            .grid{grid-template-columns:1fr}
-            .card-span-2{grid-column:span 1}
-        }
-        
-        /* Pull to refresh indicator */
-        .ptr-indicator{text-align:center;padding:10px;color:#00d4ff;display:none}
-        .ptr-indicator.active{display:block}
+        .modal-content{background:#1a1a2e;border-radius:16px;width:100%;max-width:500px}
+        .modal-header{padding:15px 20px;border-bottom:1px solid rgba(255,255,255,0.1);display:flex;justify-content:space-between;align-items:center}
+        .modal-body{padding:20px}
+        .modal-close{background:none;border:none;color:#888;font-size:1.5em;cursor:pointer}
+        .green{color:#00c853}.red{color:#ff5252}.yellow{color:#ffc107}.cyan{color:#00d4ff}.purple{color:#7b2cbf}
+        .empty-state{text-align:center;padding:40px 20px;color:#888}
+        .empty-state-icon{font-size:3em;margin-bottom:15px}
+        @media(max-width:768px){.stats-grid{grid-template-columns:repeat(2,1fr)}.setup-metrics{grid-template-columns:repeat(2,1fr)}}
     </style>
 </head>
 <body>
-    <!-- Top Nav -->
-    <div class="nav">
-        <div class="nav-brand">📊 Trading Cockpit</div>
-        <div class="nav-tabs">
-            <a href="/" class="nav-tab {{ 'active' if tab == 'dashboard' else '' }}">Dashboard</a>
-            <a href="/advisor" class="nav-tab {{ 'active' if tab == 'advisor' else '' }}">🤖 AI Advisor</a>
-            <a href="/scanner" class="nav-tab {{ 'active' if tab == 'scanner' else '' }}">🔥 Scanner</a>
-            <a href="/positions" class="nav-tab {{ 'active' if tab == 'positions' else '' }}">Positions</a>
-            <a href="/market" class="nav-tab {{ 'active' if tab == 'market' else '' }}">Market</a>
-            <a href="/risk" class="nav-tab {{ 'active' if tab == 'risk' else '' }}">Risk</a>
-            <a href="/journal" class="nav-tab {{ 'active' if tab == 'journal' else '' }}">Journal</a>
+    <div class="header">
+        <div class="logo">Trading <span>Cockpit</span> v4</div>
+        <div style="display:flex;gap:10px;align-items:center">
+            <span class="market-status {{ 'market-open' if is_market_open else 'market-closed' }}">{{ 'OPEN' if is_market_open else 'CLOSED' }}</span>
+            <a href="/scan" class="btn btn-sm btn-primary">🔄</a>
         </div>
-        <a href="/refresh" class="nav-refresh">🔄</a>
     </div>
     
-    <!-- Bottom Tab Bar (Mobile) -->
-    <div class="tab-bar">
-        <div class="tab-bar-inner">
-            <a href="/" class="tab-item {{ 'active' if tab == 'dashboard' else '' }}"><span class="tab-icon">📊</span>Home</a>
-            <a href="/advisor" class="tab-item {{ 'active' if tab == 'advisor' else '' }}"><span class="tab-icon">🤖</span>AI</a>
-            <a href="/scanner" class="tab-item {{ 'active' if tab == 'scanner' else '' }}"><span class="tab-icon">🔥</span>Scan</a>
-            <a href="/positions" class="tab-item {{ 'active' if tab == 'positions' else '' }}"><span class="tab-icon">📈</span>Trades</a>
-            <a href="/market" class="tab-item {{ 'active' if tab == 'market' else '' }}"><span class="tab-icon">🌍</span>Market</a>
-        </div>
+    <div class="nav">
+        <a href="/" class="nav-item {{ 'active' if tab == 'scanner' else '' }}">🔥 Scanner{% if ready_count %}<span class="nav-badge">{{ ready_count }}</span>{% endif %}</a>
+        <a href="/positions" class="nav-item {{ 'active' if tab == 'positions' else '' }}">📊 Positions{% if position_count %}<span class="nav-badge">{{ position_count }}</span>{% endif %}</a>
+        <a href="/journal" class="nav-item {{ 'active' if tab == 'journal' else '' }}">📝 Journal</a>
+        <a href="/mentor" class="nav-item {{ 'active' if tab == 'mentor' else '' }}">🎓 Mentor</a>
+        <a href="/settings" class="nav-item {{ 'active' if tab == 'settings' else '' }}">⚙️</a>
     </div>
     
     <div class="container">
-        {% if tab == 'dashboard' %}
-        <!-- DASHBOARD -->
-        <div class="banner">
-            <div class="banner-headline">{{ market.headline }}</div>
-            <div class="banner-sub">{{ market.summary }}</div>
-            <div class="stats">
-                <div class="stat"><div class="stat-label">VIX</div><div class="stat-value {{ 'green' if market.vix.level < 15 else 'yellow' if market.vix.level < 20 else 'orange' if market.vix.level < 25 else 'red' }}">{{ '%.1f'|format(market.vix.level) }}</div></div>
-                <div class="stat"><div class="stat-label">SPY</div><div class="stat-value {{ 'green' if market.spy.change_pct > 0 else 'red' }}">{{ '%+.1f'|format(market.spy.change_pct) }}%</div></div>
-                <div class="stat"><div class="stat-label">Positions</div><div class="stat-value">{{ portfolio.risk.position_count }}</div></div>
-                <div class="stat"><div class="stat-label">P&L</div><div class="stat-value {{ 'green' if total_pnl >= 0 else 'red' }}">${{ '%+.0f'|format(total_pnl) }}</div></div>
-                <div class="stat"><div class="stat-label">Hot</div><div class="stat-value orange">{{ hot_count }}</div></div>
-                <div class="stat"><div class="stat-label">Win%</div><div class="stat-value">{{ '%.0f'|format(journal_data.stats.win_rate) }}%</div></div>
-            </div>
+        {% if tab == 'scanner' %}
+        <div class="stats-grid">
+            <div class="stat-card"><div class="stat-value green">{{ scan_stats.ready_now }}</div><div class="stat-label">READY NOW</div></div>
+            <div class="stat-card"><div class="stat-value cyan">{{ scan_stats.setting_up }}</div><div class="stat-label">SETTING UP</div></div>
+            <div class="stat-card"><div class="stat-value yellow">{{ scan_stats.building }}</div><div class="stat-label">BUILDING</div></div>
+            <div class="stat-card"><div class="stat-value">{{ scan_stats.total }}</div><div class="stat-label">WATCHLIST</div></div>
         </div>
         
-        <div class="grid">
-            <!-- Hot List Preview -->
-            <div class="card">
-                <div class="card-header">🔥 Hot List <a href="/scanner" class="btn btn-sm btn-secondary">View All</a></div>
-                <div class="card-body">
-                    {% if hot_list %}
-                    {% for h in hot_list[:3] %}
-                    <div class="hot-item {{ 'a-plus' if h.setup_quality == 'A+' else 'a' if h.setup_quality == 'A' else 'b' if h.setup_quality == 'B' else 'c' }}">
-                        <div class="hot-header">
-                            <div><span class="hot-rank">#{{ h.rank }}</span><span class="hot-symbol">{{ h.symbol }}</span></div>
-                            <span class="hot-score">{{ h.setup_quality }}</span>
-                        </div>
-                        <div style="font-size:0.85em;color:#aaa;">{{ h.headline }}</div>
-                    </div>
-                    {% endfor %}
-                    {% else %}
-                    <p style="color:#888;text-align:center;padding:20px;">Add stocks to watchlist</p>
-                    {% endif %}
-                </div>
-            </div>
-            
-            <!-- Strategy -->
-            <div class="card">
-                <div class="card-header">📋 Strategy</div>
-                <div class="card-body">
-                    <div class="row"><span class="label">Bias</span><span class="{{ 'green' if market.strategy.bias == 'BULLISH' else 'red' if market.strategy.bias == 'BEARISH' else 'yellow' }}">{{ market.strategy.bias }}</span></div>
-                    <div class="row"><span class="label">Direction</span><span>{{ market.strategy.preferred_direction }}</span></div>
-                    <div class="row"><span class="label">Size</span><span>{{ '%.0f'|format(market.strategy.size_multiplier * 100) }}%</span></div>
-                    <div class="rec-box">
-                        <div class="rec-title">✓ Do</div>
-                        {% for rec in market.strategy.recommendations[:2] %}
-                        <div class="rec-item">{{ rec }}</div>
-                        {% endfor %}
-                    </div>
-                </div>
-            </div>
-            
-            <!-- Positions -->
-            <div class="card">
-                <div class="card-header">📈 Positions</div>
-                <div class="card-body">
-                    {% if positions %}
-                    {% for pid, p in positions.items() %}
-                    <div style="background:rgba(255,255,255,0.02);border-radius:8px;padding:12px;margin-bottom:8px;">
-                        <div style="display:flex;justify-content:space-between;">
-                            <span style="font-weight:700;">{{ p.symbol }} {{ p.strike }}{{ 'C' if 'CALL' in p.type else 'P' }}</span>
-                            <span class="{{ 'green' if p.pnl_percent >= 0 else 'red' }}">{{ '%+.0f'|format(p.pnl_percent) }}%</span>
-                        </div>
-                        <div style="font-size:0.8em;color:#888;margin-top:4px;">{{ p.dte }} DTE</div>
-                    </div>
-                    {% endfor %}
-                    {% else %}
-                    <p style="color:#888;text-align:center;padding:20px;">No positions</p>
-                    {% endif %}
-                </div>
-            </div>
-            
-            <!-- Risk -->
-            <div class="card">
-                <div class="card-header">⚠️ Risk</div>
-                <div class="card-body">
-                    <div class="row"><span class="label">Delta</span><span class="{{ 'green' if portfolio.greeks.total_delta > 0 else 'red' }}">{{ '%.0f'|format(portfolio.greeks.total_delta) }}</span></div>
-                    <div class="row"><span class="label">Theta</span><span class="red">${{ '%.0f'|format(portfolio.greeks.total_theta) }}/day</span></div>
-                    <div class="row"><span class="label">At Risk</span><span>{{ '%.1f'|format(portfolio.risk.capital_at_risk_pct) }}%</span></div>
-                    <div class="gauge"><div class="gauge-fill {{ 'g-green' if portfolio.risk.capital_at_risk_pct < 5 else 'g-yellow' if portfolio.risk.capital_at_risk_pct < 10 else 'g-red' }}" style="width:{{ [portfolio.risk.capital_at_risk_pct * 4, 100]|min }}%"></div></div>
-                </div>
-            </div>
+        <div style="margin-bottom:15px">
+            <button class="btn btn-primary" onclick="openModal('add-stock')">➕ Add Stock</button>
+            <span style="color:#888;font-size:0.8em;margin-left:15px">Last: {{ scan_stats.last_scan or 'Never' }}</span>
         </div>
         
-        {% elif tab == 'advisor' %}
-        <!-- AI ADVISOR -->
-        <div class="banner" style="border-color:rgba(123,44,191,0.4);">
-            <div class="banner-headline">🤖 AI Trading Advisor</div>
-            <div class="banner-sub">Opus 4.5 analyzing your trading</div>
+        {% if categorized.READY_NOW %}
+        <div class="category-header category-ready">
+            <span class="category-icon">🔥</span>
+            <div><div class="category-title">READY NOW</div><div class="category-count">{{ categorized.READY_NOW|length }} ready</div></div>
         </div>
-        
-        {% if ai_briefing.has_content %}
-        <div class="card" style="margin-bottom:12px;border-left:4px solid #7b2cbf;">
-            <div class="card-body">
-                <h3 style="margin-bottom:12px;">{{ ai_briefing.headline }}</h3>
-                <p style="color:#aaa;margin-bottom:16px;">{{ ai_briefing.market_summary }}</p>
-                
-                {% if ai_briefing.action_items %}
-                <div class="ai-section" style="background:rgba(0,200,83,0.1);">
-                    <div class="ai-section-title" style="color:#00c853;">⚡ ACTION ITEMS</div>
-                    {% for item in ai_briefing.action_items %}
-                    <div class="action-item">{{ item }}</div>
-                    {% endfor %}
+        {% for r in categorized.READY_NOW %}
+        <div class="setup-card tier-{{ r.tier|lower }}">
+            <div class="setup-header">
+                <div>
+                    <span class="setup-symbol">{{ r.symbol }}</span>
+                    <span class="setup-price">${{ '%.2f'|format(r.price) }}</span>
+                    <span class="{{ 'green' if r.change_pct > 0 else 'red' }}">{{ '%+.1f'|format(r.change_pct) }}%</span>
                 </div>
-                {% endif %}
-                
-                {% if ai_briefing.warnings %}
-                <div class="ai-section" style="background:rgba(255,82,82,0.1);">
-                    <div class="ai-section-title" style="color:#ff5252;">⚠️ WARNINGS</div>
-                    {% for warn in ai_briefing.warnings %}
-                    <div class="warning-item">• {{ warn }}</div>
-                    {% endfor %}
+                <span class="setup-tier tier-{{ r.tier|lower }}-badge">{{ r.tier }}-TIER</span>
+            </div>
+            <span class="setup-type setup-{{ r.setup_direction|lower }}">{{ r.setup_direction }} {{ r.setup_type }}</span>
+            <div class="setup-metrics">
+                <div class="metric"><div class="metric-label">PRIORITY</div><div class="metric-value">{{ r.priority_score }}/150</div></div>
+                <div class="metric"><div class="metric-label">EXEC</div><div class="metric-value {{ 'green' if r.exec_readiness >= 10 else 'yellow' }}">{{ r.exec_readiness }}/14</div></div>
+                <div class="metric"><div class="metric-label">CONFLUENCE</div><div class="metric-value">{{ r.confluence_score }}/100</div></div>
+            </div>
+            <div class="setup-analysis">
+                <div class="analysis-row"><span class="analysis-label">RS vs SPY</span><span class="{{ 'green' if r.relative_strength > 0.5 else 'red' if r.relative_strength < -0.5 else '' }}">{{ '%+.1f'|format(r.relative_strength) }}%</span></div>
+                <div class="analysis-row"><span class="analysis-label">IV</span><span class="{{ 'green' if r.iv_percentile < 30 else 'red' if r.iv_percentile > 70 else '' }}">{{ '%.0f'|format(r.iv_percentile) }}%</span></div>
+                <div class="analysis-row"><span class="analysis-label">RSI</span><span>{{ '%.0f'|format(r.rsi) }}</span></div>
+                <div class="analysis-row"><span class="analysis-label">Squeeze</span><span>{{ 'YES (' + r.squeeze_bars|string + ')' if r.squeeze_on else 'No' }}</span></div>
+            </div>
+            {% if r.options and r.options.recommended_contract %}
+            <div class="contract-box">
+                <div class="contract-header">
+                    <span class="contract-title">CONTRACT</span>
+                    <span class="contract-strike">${{ '%.0f'|format(r.options.recommended_contract.strike) }} {{ r.setup_direction }}</span>
                 </div>
-                {% endif %}
-            </div>
-        </div>
-        
-        <div class="grid">
-            <div class="card">
-                <div class="card-header">🌍 Market</div>
-                <div class="card-body"><p style="font-size:0.9em;">{{ ai_briefing.market_outlook }}</p></div>
-            </div>
-            <div class="card">
-                <div class="card-header">📈 Positions</div>
-                <div class="card-body"><p style="font-size:0.9em;white-space:pre-line;">{{ ai_briefing.position_review }}</p></div>
-            </div>
-            <div class="card">
-                <div class="card-header" style="color:#00c853;">✅ Do Today</div>
-                <div class="card-body"><p style="font-size:0.9em;white-space:pre-line;">{{ ai_briefing.what_to_do_today }}</p></div>
-            </div>
-            <div class="card">
-                <div class="card-header" style="color:#ff5252;">🚫 Avoid</div>
-                <div class="card-body"><p style="font-size:0.9em;white-space:pre-line;">{{ ai_briefing.what_to_avoid }}</p></div>
-            </div>
-            <div class="card">
-                <div class="card-header">🔥 Opportunities</div>
-                <div class="card-body"><p style="font-size:0.9em;white-space:pre-line;">{{ ai_briefing.opportunities }}</p></div>
-            </div>
-            <div class="card">
-                <div class="card-header">💡 Insight</div>
-                <div class="card-body"><p style="font-size:0.9em;">{{ ai_briefing.performance_insight }}</p></div>
-            </div>
-        </div>
-        
-        <div style="margin-top:12px;text-align:center;">
-            <a href="/advisor?refresh=1" class="btn btn-primary">🔄 Refresh</a>
-            <div style="color:#666;font-size:0.75em;margin-top:8px;">{{ ai_briefing.generated_at }}</div>
-        </div>
-        
-        {% else %}
-        <div class="card">
-            <div class="card-body" style="text-align:center;padding:40px;">
-                <div style="font-size:3em;margin-bottom:15px;">🤖</div>
-                <h3>AI Not Connected</h3>
-                <p style="color:#888;margin-top:10px;">Add ANTHROPIC_API_KEY to .env</p>
-            </div>
-        </div>
-        {% endif %}
-        
-        {% elif tab == 'scanner' %}
-        <!-- SCANNER - AI POWERED -->
-        <div class="banner" style="border-color:rgba(255,165,0,0.4);">
-            <div class="banner-headline">🔥 AI Hot List Scanner</div>
-            <div class="banner-sub">Claude Opus analyzes breakouts & continuations for high-probability trades</div>
-        </div>
-        
-        <div style="margin-bottom:12px;display:flex;gap:10px;flex-wrap:wrap;">
-            <button class="btn btn-primary" onclick="openModal('add-watchlist')">➕ Add Stock</button>
-            <a href="/ai-scan" class="btn btn-secondary" style="background:linear-gradient(135deg,#7b2cbf,#5a189a);">🤖 AI Deep Scan</a>
-            <a href="/quick-scan" class="btn btn-secondary">⚡ Quick Scan</a>
-        </div>
-        
-        {% if ai_scan_results %}
-        <!-- AI Analysis Summary -->
-        <div class="card" style="margin-bottom:15px;border-left:4px solid #7b2cbf;">
-            <div class="card-header" style="color:#7b2cbf;">🤖 AI Market Analysis</div>
-            <div class="card-body">
-                <p style="font-size:0.9em;white-space:pre-line;">{{ ai_scan_results.market_context }}</p>
-                {% if ai_scan_results.top_pick %}
-                <div style="background:rgba(0,200,83,0.1);border-radius:8px;padding:12px;margin-top:12px;">
-                    <div style="color:#00c853;font-weight:600;margin-bottom:5px;">⭐ TOP PICK: {{ ai_scan_results.top_pick.symbol }}</div>
-                    <div style="font-size:0.9em;">{{ ai_scan_results.top_pick.reason }}</div>
-                </div>
-                {% endif %}
-            </div>
-        </div>
-        {% endif %}
-        
-        {% if hot_list %}
-        {% for h in hot_list %}
-        <div class="card" style="margin-bottom:12px;border-left:4px solid {{ '#00c853' if h.setup_quality in ['A+','A'] else '#ffc107' if h.setup_quality == 'B' else '#888' }};">
-            <div class="card-body">
-                <!-- Header -->
-                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-                    <div>
-                        <span style="font-size:1.4em;font-weight:700;color:#00d4ff;margin-right:8px;">#{{ h.rank }}</span>
-                        <span style="font-size:1.2em;font-weight:700;">{{ h.symbol }}</span>
-                        <span class="{{ 'green' if h.change_pct > 0 else 'red' }}" style="margin-left:10px;">{{ '%+.1f'|format(h.change_pct) }}%</span>
-                    </div>
-                    <div style="text-align:right;">
-                        <div style="font-size:1.5em;font-weight:700;color:{{ '#00c853' if h.setup_quality in ['A+','A'] else '#ffc107' if h.setup_quality == 'B' else '#888' }};">{{ h.setup_quality }}</div>
-                        <div style="font-size:0.75em;color:#888;">Score: {{ '%.0f'|format(h.hot_score) }}/100</div>
-                    </div>
-                </div>
-                
-                <!-- Why Hot -->
-                <div style="background:rgba(255,165,0,0.1);border-radius:8px;padding:12px;margin-bottom:12px;">
-                    <div style="color:#ffa500;font-weight:600;font-size:0.8em;margin-bottom:5px;">🔥 WHY IT'S HOT</div>
-                    <div style="font-size:0.9em;">{{ h.headline }}</div>
-                </div>
-                
-                <!-- Setup Type -->
-                {% if h.setup_type %}
-                <div style="display:inline-block;background:rgba(0,212,255,0.15);padding:4px 10px;border-radius:4px;font-size:0.8em;color:#00d4ff;margin-bottom:12px;">
-                    {{ h.setup_type }}
-                </div>
-                {% endif %}
-                
-                <!-- Key Levels -->
-                {% if h.key_levels %}
-                <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:12px;">
-                    <div style="background:rgba(0,0,0,0.3);padding:10px;border-radius:6px;text-align:center;">
-                        <div style="font-size:0.7em;color:#888;">ENTRY</div>
-                        <div style="font-weight:700;color:#00d4ff;">${{ '%.2f'|format(h.key_levels.entry) }}</div>
-                    </div>
-                    <div style="background:rgba(0,0,0,0.3);padding:10px;border-radius:6px;text-align:center;">
-                        <div style="font-size:0.7em;color:#888;">TARGET</div>
-                        <div style="font-weight:700;color:#00c853;">${{ '%.2f'|format(h.key_levels.target) }}</div>
-                    </div>
-                    <div style="background:rgba(0,0,0,0.3);padding:10px;border-radius:6px;text-align:center;">
-                        <div style="font-size:0.7em;color:#888;">STOP</div>
-                        <div style="font-weight:700;color:#ff5252;">${{ '%.2f'|format(h.key_levels.stop) }}</div>
-                    </div>
-                </div>
-                {% endif %}
-                
-                <!-- Options Trade -->
-                {% if h.options_rec %}
-                <div style="background:linear-gradient(135deg,rgba(0,200,83,0.15),rgba(0,200,83,0.05));border-radius:8px;padding:12px;margin-bottom:12px;">
-                    <div style="display:flex;justify-content:space-between;align-items:center;">
-                        <div>
-                            <div style="font-size:0.75em;color:#888;margin-bottom:3px;">RECOMMENDED TRADE</div>
-                            <div style="font-size:1.1em;font-weight:700;">
-                                <span class="{{ 'green' if h.options_rec.direction == 'CALL' else 'red' }}">{{ h.options_rec.direction }}</span>
-                                ${{ h.options_rec.strike }} 
-                                <span style="color:#888;">exp {{ h.options_rec.expiration }}</span>
-                            </div>
-                        </div>
-                        <div style="text-align:right;">
-                            {% if h.options_rec.est_premium %}
-                            <div style="font-size:0.75em;color:#888;">Est. Premium</div>
-                            <div style="font-weight:600;">${{ '%.2f'|format(h.options_rec.est_premium) }}</div>
-                            {% endif %}
-                        </div>
-                    </div>
-                    {% if h.options_rec.rationale %}
-                    <div style="font-size:0.85em;color:#aaa;margin-top:8px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.1);">
-                        💡 {{ h.options_rec.rationale }}
-                    </div>
-                    {% endif %}
-                </div>
-                {% endif %}
-                
-                <!-- Risk/Reward -->
-                {% if h.risk_reward %}
-                <div style="display:flex;gap:15px;margin-bottom:12px;font-size:0.85em;">
-                    <div><span style="color:#888;">R:R</span> <span style="font-weight:600;">{{ h.risk_reward }}</span></div>
-                    <div><span style="color:#888;">Win Prob</span> <span style="font-weight:600;">{{ h.win_probability }}%</span></div>
-                    <div><span style="color:#888;">Timeframe</span> <span style="font-weight:600;">{{ h.timeframe }}</span></div>
-                </div>
-                {% endif %}
-                
-                <!-- AI Notes -->
-                {% if h.ai_notes %}
-                <div style="background:rgba(123,44,191,0.1);border-radius:8px;padding:10px;font-size:0.85em;">
-                    <span style="color:#7b2cbf;">🤖</span> {{ h.ai_notes }}
-                </div>
-                {% endif %}
-                
-                <div style="margin-top:12px;">
-                    <a href="/analyze/{{ h.symbol }}" class="btn btn-sm btn-secondary">📊 Full Analysis</a>
-                </div>
-            </div>
-        </div>
-        {% endfor %}
-        {% else %}
-        <div class="card">
-            <div class="card-body" style="text-align:center;padding:40px;">
-                <div style="font-size:3em;margin-bottom:15px;">🔍</div>
-                <h3 style="margin-bottom:10px;">No Stocks Scanned Yet</h3>
-                <p style="color:#888;margin-bottom:20px;">Add stocks to your watchlist and run AI scan to find breakout opportunities</p>
-                <button class="btn btn-primary" onclick="openModal('add-watchlist')">➕ Add Your First Stock</button>
-            </div>
-        </div>
-        {% endif %}
-        
-        <!-- Watchlist -->
-        <div class="card" style="margin-top:15px;">
-            <div class="card-header">
-                <span>📋 Watchlist ({{ watchlist|length }})</span>
-                {% if watchlist %}<a href="/ai-scan" class="btn btn-sm btn-primary">🤖 Scan All</a>{% endif %}
-            </div>
-            <div class="card-body">
-                {% if watchlist %}
-                {% for w in watchlist %}
-                <div style="display:flex;justify-content:space-between;align-items:center;padding:10px;background:rgba(255,255,255,0.02);border-radius:6px;margin-bottom:8px;">
-                    <div>
-                        <span style="font-weight:700;">{{ w.symbol }}</span>
-                        {% if w.sector %}<span style="color:#888;font-size:0.8em;margin-left:8px;">{{ w.sector }}</span>{% endif %}
-                    </div>
-                    <div style="display:flex;gap:8px;">
-                        <a href="/analyze/{{ w.symbol }}" class="btn btn-sm btn-secondary">📊</a>
-                        <a href="/remove-watchlist/{{ w.symbol }}" class="btn btn-sm btn-danger">✗</a>
-                    </div>
-                </div>
-                {% endfor %}
-                {% else %}
-                <p style="color:#888;text-align:center;">Add stocks to track them</p>
-                {% endif %}
-            </div>
-        </div>
-        {% else %}
-        <div class="card"><div class="card-body" style="text-align:center;padding:40px;color:#888;">Add stocks and scan</div></div>
-        {% endif %}
-        
-        <div class="card" style="margin-top:15px;">
-            <div class="card-header">📋 Watchlist ({{ watchlist|length }})</div>
-            <div class="card-body">
-                {% for w in watchlist %}
-                <div class="wl-item">
-                    <span class="wl-symbol">{{ w.symbol }}</span>
-                    <a href="/remove-watchlist/{{ w.symbol }}" class="btn btn-sm btn-danger">✗</a>
-                </div>
-                {% endfor %}
-            </div>
-        </div>
-        
-        {% elif tab == 'positions' %}
-        <!-- POSITIONS -->
-        <div style="margin-bottom:12px;"><a href="/add" class="btn btn-primary">➕ Add Position</a></div>
-        {% if positions %}
-        {% for pid, p in positions.items() %}
-        <div class="card" style="margin-bottom:12px;">
-            <div class="card-header">
-                <span>{{ p.symbol }} {{ p.strike }}{{ 'C' if 'CALL' in p.type else 'P' }}</span>
-                <span class="{{ 'green' if p.pnl_percent >= 0 else 'red' }}" style="font-size:1.2em;">{{ '%+.1f'|format(p.pnl_percent) }}%</span>
-            </div>
-            <div class="card-body">
-                {% if p.rec %}<div class="banner" style="margin-bottom:12px;padding:12px;"><strong>{{ p.rec.headline }}</strong></div>{% endif %}
-                <div class="row"><span class="label">Entry</span><span>${{ '%.2f'|format(p.entry_option) }}</span></div>
-                <div class="row"><span class="label">Current</span><span>${{ '%.2f'|format(p.current_option) }}</span></div>
-                <div class="row"><span class="label">DTE</span><span class="{{ 'red' if p.dte <= 7 else '' }}">{{ p.dte }}</span></div>
-                <div class="row"><span class="label">Delta</span><span>{{ '%.2f'|format(p.delta) }}</span></div>
-                <div style="margin-top:12px;display:flex;gap:10px;">
-                    <a href="/close/{{ pid }}" class="btn btn-primary btn-sm">Close</a>
-                    <a href="/delete/{{ pid }}" class="btn btn-sm btn-danger">Delete</a>
-                </div>
-            </div>
-        </div>
-        {% endfor %}
-        {% else %}
-        <div class="card"><div class="card-body" style="text-align:center;padding:40px;color:#888;">No positions</div></div>
-        {% endif %}
-        
-        {% elif tab == 'market' %}
-        <!-- MARKET -->
-        <div class="banner"><div class="banner-headline">{{ market.headline }}</div></div>
-        <div class="grid">
-            <div class="card">
-                <div class="card-header">📊 VIX</div>
-                <div class="card-body">
-                    <div style="font-size:2.5em;text-align:center;font-weight:700;" class="{{ 'green' if market.vix.level < 15 else 'yellow' if market.vix.level < 20 else 'red' }}">{{ '%.1f'|format(market.vix.level) }}</div>
-                    <p style="text-align:center;color:#888;margin-top:8px;font-size:0.85em;">{{ market.vix.interpretation }}</p>
-                </div>
-            </div>
-            <div class="card">
-                <div class="card-header">📈 SPY</div>
-                <div class="card-body">
-                    <div class="row"><span class="label">Price</span><span>${{ '%.2f'|format(market.spy.price) }}</span></div>
-                    <div class="row"><span class="label">Change</span><span class="{{ 'green' if market.spy.change_pct > 0 else 'red' }}">{{ '%+.2f'|format(market.spy.change_pct) }}%</span></div>
-                    <div class="row"><span class="label">Trend</span><span>{{ market.spy.direction }}</span></div>
-                    <div class="row"><span class="label">RSI</span><span>{{ '%.0f'|format(market.spy.rsi) }}</span></div>
-                </div>
-            </div>
-            <div class="card">
-                <div class="card-header">📋 Strategy</div>
-                <div class="card-body">
-                    <div class="row"><span class="label">Bias</span><span class="{{ 'green' if market.strategy.bias == 'BULLISH' else 'red' if market.strategy.bias == 'BEARISH' else 'yellow' }}">{{ market.strategy.bias }}</span></div>
-                    <div class="row"><span class="label">Trade</span><span>{{ market.strategy.preferred_direction }}</span></div>
-                    <div class="row"><span class="label">Size</span><span>{{ '%.0f'|format(market.strategy.size_multiplier * 100) }}%</span></div>
-                </div>
-            </div>
-        </div>
-        
-        {% elif tab == 'risk' %}
-        <!-- RISK -->
-        <div class="banner"><div class="banner-headline">{{ portfolio.headline }}</div></div>
-        <div class="grid">
-            <div class="card">
-                <div class="card-header">Greeks</div>
-                <div class="card-body">
-                    <div class="row"><span class="label">Delta</span><span>{{ '%.0f'|format(portfolio.greeks.total_delta) }}</span></div>
-                    <div class="row"><span class="label">Gamma</span><span>{{ '%.2f'|format(portfolio.greeks.total_gamma) }}</span></div>
-                    <div class="row"><span class="label">Theta</span><span class="red">${{ '%.0f'|format(portfolio.greeks.total_theta) }}/day</span></div>
-                    <div class="row"><span class="label">Vega</span><span>{{ '%.0f'|format(portfolio.greeks.total_vega) }}</span></div>
-                </div>
-            </div>
-            <div class="card">
-                <div class="card-header">Capital at Risk</div>
-                <div class="card-body">
-                    <div style="font-size:2.5em;text-align:center;font-weight:700;">{{ '%.1f'|format(portfolio.risk.capital_at_risk_pct) }}%</div>
-                    <div class="gauge"><div class="gauge-fill {{ 'g-green' if portfolio.risk.capital_at_risk_pct < 5 else 'g-yellow' if portfolio.risk.capital_at_risk_pct < 10 else 'g-red' }}" style="width:{{ [portfolio.risk.capital_at_risk_pct * 4, 100]|min }}%"></div></div>
-                    <p style="text-align:center;color:#888;margin-top:8px;font-size:0.85em;">Target: < 10%</p>
-                </div>
-            </div>
-        </div>
-        {% if portfolio.warnings %}
-        <div class="card" style="margin-top:12px;">
-            <div class="card-header" style="color:#ff9800;">⚠️ Warnings</div>
-            <div class="card-body">
-                {% for w in portfolio.warnings %}
-                <div style="padding:8px 0;color:#ff9800;">• {{ w }}</div>
-                {% endfor %}
-            </div>
-        </div>
-        {% endif %}
-        
-        {% elif tab == 'journal' %}
-        <!-- JOURNAL -->
-        <div class="stats" style="margin-bottom:12px;">
-            <div class="stat"><div class="stat-label">P&L</div><div class="stat-value {{ 'green' if journal_data.stats.total_pnl >= 0 else 'red' }}">${{ '%.0f'|format(journal_data.stats.total_pnl) }}</div></div>
-            <div class="stat"><div class="stat-label">Trades</div><div class="stat-value">{{ journal_data.stats.total_trades }}</div></div>
-            <div class="stat"><div class="stat-label">Win%</div><div class="stat-value">{{ '%.0f'|format(journal_data.stats.win_rate) }}%</div></div>
-            <div class="stat"><div class="stat-label">PF</div><div class="stat-value">{{ '%.1f'|format(journal_data.stats.profit_factor) }}</div></div>
-            <div class="stat"><div class="stat-label">Expect</div><div class="stat-value">${{ '%.0f'|format(journal_data.stats.expectancy) }}</div></div>
-            <div class="stat"><div class="stat-label">Streak</div><div class="stat-value">{{ journal_data.stats.current_streak }}</div></div>
-        </div>
-        <div class="card">
-            <div class="card-header">Recent Trades</div>
-            <div class="card-body">
-                {% if journal_data.recent_trades %}
-                {% for t in journal_data.recent_trades %}
-                <div class="row">
-                    <span>{{ t.symbol }} ({{ t.exit_date }})</span>
-                    <span class="{{ 'green' if t.net_pnl >= 0 else 'red' }}">${{ '%+.0f'|format(t.net_pnl) }}</span>
-                </div>
-                {% endfor %}
-                {% else %}
-                <p style="color:#888;text-align:center;">No trades yet</p>
-                {% endif %}
-            </div>
-        </div>
-        
-        {% elif tab == 'analysis' %}
-        <!-- ANALYSIS -->
-        <div class="banner">
-            <div class="banner-headline">{{ analysis.symbol }}</div>
-            <div class="banner-sub">${{ '%.2f'|format(analysis.price) }} <span class="{{ 'green' if analysis.change_pct > 0 else 'red' }}">{{ '%+.1f'|format(analysis.change_pct) }}%</span></div>
-        </div>
-        
-        <div class="card" style="margin-bottom:12px;">
-            <div class="card-body" style="text-align:center;">
-                <div style="font-size:3em;font-weight:700;color:{{ '#00c853' if analysis.setup_quality in ['A+','A'] else '#ffc107' if analysis.setup_quality == 'B' else '#888' }};">{{ analysis.setup_quality }}</div>
-                <div style="margin-top:8px;">Score: {{ '%.0f'|format(analysis.hot_score) }}/100</div>
-                <div class="gauge" style="margin-top:10px;"><div class="gauge-fill g-green" style="width:{{ analysis.hot_score }}%"></div></div>
-            </div>
-        </div>
-        
-        <div class="grid">
-            <div class="card">
-                <div class="card-header">📈 Technicals</div>
-                <div class="card-body">
-                    <div class="row"><span class="label">Trend</span><span>{{ analysis.technicals.trend_direction }}</span></div>
-                    <div class="row"><span class="label">RSI</span><span>{{ '%.0f'|format(analysis.technicals.rsi) }}</span></div>
-                    <div class="row"><span class="label">MACD</span><span>{{ analysis.technicals.macd_signal }}</span></div>
-                    <div class="row"><span class="label">Volume</span><span>{{ '%.1f'|format(analysis.technicals.volume_ratio) }}x</span></div>
-                </div>
-            </div>
-            {% if analysis.options_rec %}
-            <div class="card">
-                <div class="card-header">📋 Trade Rec</div>
-                <div class="card-body">
-                    <div style="text-align:center;margin-bottom:12px;">
-                        <span class="{{ 'green' if analysis.options_rec.direction == 'CALL' else 'red' }}" style="font-size:1.3em;font-weight:700;">{{ analysis.options_rec.direction }}</span>
-                        <div style="margin-top:4px;">${{ analysis.options_rec.strike }} exp {{ analysis.options_rec.expiration }}</div>
-                    </div>
-                    <div class="row"><span class="label">Target</span><span class="green">${{ '%.2f'|format(analysis.options_rec.stock_target) }}</span></div>
-                    <div class="row"><span class="label">Stop</span><span class="red">${{ '%.2f'|format(analysis.options_rec.stock_stop) }}</span></div>
-                    <div class="row"><span class="label">Confidence</span><span>{{ analysis.options_rec.confidence }}</span></div>
+                <div class="contract-details">
+                    <div class="contract-detail"><span class="contract-detail-label">Exp</span><span>{{ r.options.recommended_contract.expiration }} ({{ r.options.recommended_contract.dte }}d)</span></div>
+                    <div class="contract-detail"><span class="contract-detail-label">Delta</span><span>{{ '%.2f'|format(r.options.recommended_contract.delta or 0.5) }}</span></div>
+                    <div class="contract-detail"><span class="contract-detail-label">Premium</span><span>${{ '%.2f'|format(r.options.recommended_contract.mid or 0) }}</span></div>
+                    <div class="contract-detail"><span class="contract-detail-label">Contracts</span><span>{{ r.options.num_contracts }}</span></div>
+                    <div class="contract-detail"><span class="contract-detail-label">Size</span><span>${{ '{:,.0f}'.format(r.options.total_premium) }}</span></div>
+                    <div class="contract-detail"><span class="contract-detail-label">Target</span><span class="green">${{ '%.2f'|format(r.options.target_price) }}</span></div>
                 </div>
             </div>
             {% endif %}
+            {% if r.warnings %}<div class="warnings">{% for w in r.warnings %}<div class="warning-item">⚠️ {{ w }}</div>{% endfor %}</div>{% endif %}
+            <div style="display:flex;gap:10px;margin-top:12px">
+                <a href="/execute/{{ r.symbol }}" class="btn btn-success">🚀 Execute</a>
+                <a href="/analyze/{{ r.symbol }}" class="btn btn-secondary">📊 Details</a>
+            </div>
         </div>
-        <div style="margin-top:12px;"><a href="/scanner" class="btn btn-secondary">← Back</a></div>
+        {% endfor %}
+        {% endif %}
+        
+        {% if categorized.SETTING_UP %}
+        <div class="category-header category-setting">
+            <span class="category-icon">⏳</span>
+            <div><div class="category-title">SETTING UP</div><div class="category-count">{{ categorized.SETTING_UP|length }}</div></div>
+        </div>
+        {% for r in categorized.SETTING_UP %}
+        <div class="setup-card tier-{{ (r.tier or 'c')|lower }}">
+            <div class="setup-header">
+                <div><span class="setup-symbol">{{ r.symbol }}</span><span class="setup-price">${{ '%.2f'|format(r.price) }}</span></div>
+                {% if r.tier %}<span class="setup-tier tier-{{ r.tier|lower }}-badge">{{ r.tier }}</span>{% endif %}
+            </div>
+            {% if r.setup_type %}<span class="setup-type setup-{{ r.setup_direction|lower }}">{{ r.setup_direction }} {{ r.setup_type }}</span>{% endif %}
+            <div class="setup-metrics">
+                <div class="metric"><div class="metric-label">EXEC</div><div class="metric-value yellow">{{ r.exec_readiness }}/14</div></div>
+                <div class="metric"><div class="metric-label">SESSION</div><div class="metric-value">{{ r.session_phase }}</div></div>
+                <div class="metric"><div class="metric-label">RSI</div><div class="metric-value">{{ '%.0f'|format(r.rsi) }}</div></div>
+            </div>
+        </div>
+        {% endfor %}
+        {% endif %}
+        
+        {% if categorized.BUILDING %}
+        <div class="category-header category-building">
+            <span class="category-icon">👀</span>
+            <div><div class="category-title">BUILDING</div><div class="category-count">{{ categorized.BUILDING|length }}</div></div>
+        </div>
+        {% for r in categorized.BUILDING %}
+        <div class="setup-card">
+            <div class="setup-header"><span class="setup-symbol">{{ r.symbol }}</span><span class="setup-price">${{ '%.2f'|format(r.price) }}</span></div>
+            <div style="font-size:0.85em;color:#888">{% if r.squeeze_bars > 0 %}Squeeze: {{ r.squeeze_bars }}/6 bars{% else %}Watching...{% endif %}</div>
+        </div>
+        {% endfor %}
+        {% endif %}
+        
+        {% if categorized.AVOID %}
+        <div class="category-header category-avoid">
+            <span class="category-icon">❌</span>
+            <div><div class="category-title">AVOID</div><div class="category-count">{{ categorized.AVOID|length }}</div></div>
+        </div>
+        {% for r in categorized.AVOID %}
+        <div class="setup-card" style="opacity:0.6">
+            <div class="setup-header"><span class="setup-symbol">{{ r.symbol }}</span><span class="setup-price">${{ '%.2f'|format(r.price) }}</span></div>
+            {% if r.warnings %}<div class="warnings" style="margin-top:8px">{% for w in r.warnings %}<div class="warning-item">{{ w }}</div>{% endfor %}</div>{% endif %}
+        </div>
+        {% endfor %}
+        {% endif %}
+        
+        {% if not scan_stats.total %}
+        <div class="empty-state">
+            <div class="empty-state-icon">🔍</div>
+            <h3>No Stocks</h3>
+            <p style="margin:15px 0">Add stocks to scan</p>
+            <button class="btn btn-primary" onclick="openModal('add-stock')">➕ Add Stock</button>
+        </div>
+        {% endif %}
+        
+        {% elif tab == 'positions' %}
+        <h2 style="margin-bottom:15px">Open Positions</h2>
+        {% if positions %}
+        {% for p in positions %}
+        <div class="card">
+            <div class="card-header">
+                <div><span style="font-weight:700">{{ p.symbol }}</span><span class="setup-type setup-{{ p.direction|lower }}" style="margin-left:10px">{{ p.direction }}</span></div>
+                <span class="{{ 'green' if p.pnl_percent and p.pnl_percent > 0 else 'red' }}" style="font-size:1.2em;font-weight:700">{{ '%+.1f'|format(p.pnl_percent or 0) }}%</span>
+            </div>
+            <div class="card-body">
+                <div class="setup-metrics">
+                    <div class="metric"><div class="metric-label">ENTRY</div><div class="metric-value">${{ '%.2f'|format(p.entry_price or 0) }}</div></div>
+                    <div class="metric"><div class="metric-label">CURRENT</div><div class="metric-value">${{ '%.2f'|format(p.current_price or p.entry_price or 0) }}</div></div>
+                    <div class="metric"><div class="metric-label">P&L</div><div class="metric-value {{ 'green' if p.pnl_dollars and p.pnl_dollars > 0 else 'red' }}">${{ '{:,.0f}'.format(p.pnl_dollars or 0) }}</div></div>
+                </div>
+                <div style="margin-top:15px"><span style="color:#888;font-size:0.85em">{{ p.tier }}-TIER {{ p.setup_type }} | ${{ p.strike }} {{ p.expiration }}</span></div>
+                <div style="display:flex;gap:10px;margin-top:12px">
+                    <a href="/close/{{ p.id }}" class="btn btn-danger btn-sm">Close</a>
+                    <a href="/analyze/{{ p.symbol }}" class="btn btn-secondary btn-sm">Check</a>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+        {% else %}
+        <div class="empty-state"><div class="empty-state-icon">📊</div><h3>No Open Positions</h3></div>
+        {% endif %}
+        
+        {% elif tab == 'journal' %}
+        <h2 style="margin-bottom:15px">Trading Journal</h2>
+        <div class="stats-grid">
+            <div class="stat-card"><div class="stat-value">{{ stats.overall.total_trades or 0 }}</div><div class="stat-label">TRADES</div></div>
+            <div class="stat-card"><div class="stat-value {{ 'green' if stats.overall.win_rate and stats.overall.win_rate > 50 else 'red' }}">{{ '%.0f'|format(stats.overall.win_rate or 0) }}%</div><div class="stat-label">WIN RATE</div></div>
+            <div class="stat-card"><div class="stat-value {{ 'green' if stats.overall.avg_return and stats.overall.avg_return > 0 else 'red' }}">{{ '%+.1f'|format(stats.overall.avg_return or 0) }}%</div><div class="stat-label">AVG RETURN</div></div>
+            <div class="stat-card"><div class="stat-value {{ 'green' if stats.overall.total_pnl and stats.overall.total_pnl > 0 else 'red' }}">${{ '{:,.0f}'.format(stats.overall.total_pnl or 0) }}</div><div class="stat-label">TOTAL P&L</div></div>
+        </div>
+        {% if stats.by_setup %}
+        <div class="card"><div class="card-header">📊 By Setup Type</div><div class="card-body">
+            <table class="journal-table"><thead><tr><th>Setup</th><th>Trades</th><th>Win%</th><th>Avg</th><th>P&L</th></tr></thead><tbody>
+            {% for s in stats.by_setup %}<tr><td>{{ s.tier }}-{{ s.setup_type }}</td><td>{{ s.trades }}</td><td class="{{ 'green' if s.win_rate > 60 else 'red' if s.win_rate < 50 else '' }}">{{ '%.0f'|format(s.win_rate) }}%</td><td class="{{ 'green' if s.avg_return > 0 else 'red' }}">{{ '%+.1f'|format(s.avg_return) }}%</td><td class="{{ 'green' if s.total_pnl > 0 else 'red' }}">${{ '{:,.0f}'.format(s.total_pnl) }}</td></tr>{% endfor %}
+            </tbody></table>
+        </div></div>
+        {% endif %}
+        <div class="card"><div class="card-header">📝 Recent Trades</div><div class="card-body">
+            {% if journal %}
+            <table class="journal-table"><thead><tr><th>Symbol</th><th>Setup</th><th>P&L</th><th>Days</th></tr></thead><tbody>
+            {% for j in journal %}<tr><td><span style="font-weight:600">{{ j.symbol }}</span><span class="setup-type setup-{{ j.direction|lower }}" style="font-size:0.7em;padding:2px 6px;margin-left:5px">{{ j.direction }}</span></td><td>{{ j.tier }}-{{ j.setup_type or 'N/A' }}</td><td class="{{ 'green' if j.pnl_percent and j.pnl_percent > 0 else 'red' }}">{{ '%+.1f'|format(j.pnl_percent or 0) }}%</td><td>{{ j.hold_days or 0 }}d</td></tr>{% endfor %}
+            </tbody></table>
+            {% else %}<div class="empty-state"><p>No trades yet</p></div>{% endif %}
+        </div></div>
+        
+        {% elif tab == 'mentor' %}
+        <h2 style="margin-bottom:15px">🎓 AI Mentor</h2>
+        <div class="card mentor-card"><div class="card-header">📋 Daily Briefing</div><div class="card-body">
+            {% if briefing %}<div style="white-space:pre-wrap;font-size:0.95em;line-height:1.6">{{ briefing }}</div>
+            {% else %}<p style="color:#888">Run scan for briefing</p><a href="/generate-briefing" class="btn btn-primary" style="margin-top:10px">Generate</a>{% endif %}
+        </div></div>
+        <div class="card mentor-card"><div class="card-header">🔍 Your Patterns</div><div class="card-body">
+            {% if patterns %}<div style="white-space:pre-wrap;font-size:0.95em;line-height:1.6">{{ patterns.full_analysis }}</div>
+            {% else %}<p style="color:#888">Need more trades for analysis</p><a href="/analyze-patterns" class="btn btn-secondary" style="margin-top:10px">Analyze</a>{% endif %}
+        </div></div>
+        
+        {% elif tab == 'settings' %}
+        <h2 style="margin-bottom:15px">⚙️ Settings</h2>
+        <form method="POST" action="/settings">
+            <div class="card"><div class="card-header">💰 Position Sizing</div><div class="card-body">
+                <div class="form-group"><label>Capital ($)</label><input type="number" name="capital" value="{{ settings.capital or 100000 }}" step="1000"></div>
+                <div class="form-group"><label>A-Tier Size (%)</label><input type="number" name="tier_a_pct" value="{{ settings.tier_a_pct or 30 }}" min="1" max="100"></div>
+                <div class="form-group"><label>B-Tier Reduction (%)</label><input type="number" name="tier_b_reduction" value="{{ settings.tier_b_reduction or 25 }}" min="0" max="100"></div>
+                <div class="form-group"><label>C-Tier Reduction (%)</label><input type="number" name="tier_c_reduction" value="{{ settings.tier_c_reduction or 50 }}" min="0" max="100"></div>
+            </div></div>
+            <div class="card"><div class="card-header">📊 Contract Prefs</div><div class="card-body">
+                <div class="form-group"><label>Target Delta</label><input type="number" name="target_delta" value="{{ settings.target_delta or 0.50 }}" step="0.05" min="0.30" max="0.80"></div>
+                <div class="form-group"><label>Min DTE</label><input type="number" name="min_dte" value="{{ settings.min_dte or 30 }}" min="7" max="90"></div>
+                <div class="form-group"><label>Max DTE</label><input type="number" name="max_dte" value="{{ settings.max_dte or 45 }}" min="14" max="120"></div>
+            </div></div>
+            <button type="submit" class="btn btn-primary" style="width:100%">Save Settings</button>
+        </form>
+        <div class="card" style="margin-top:20px"><div class="card-header">📋 Watchlist ({{ watchlist|length }})</div><div class="card-body">
+            {% for w in watchlist %}<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.05)">
+                <span>{{ w.symbol }} <span style="color:#888;font-size:0.8em">{{ w.sector }}</span></span>
+                <a href="/watchlist/remove/{{ w.symbol }}" class="btn btn-danger btn-sm">✕</a>
+            </div>{% endfor %}
+        </div></div>
         {% endif %}
     </div>
     
-    <!-- Modal -->
-    <div class="modal" id="add-watchlist">
+    <div class="modal" id="add-stock">
         <div class="modal-content">
-            <div class="modal-header"><h3>Add to Watchlist</h3><button class="modal-close" onclick="closeModal('add-watchlist')">×</button></div>
-            <form action="/add-watchlist" method="POST">
-                <div class="form-group">
-                    <label>Stock Symbol</label>
-                    <input type="text" name="symbol" required autocapitalize="characters" autocomplete="off" placeholder="AAPL, TSLA, NVDA..." style="text-transform:uppercase">
-                </div>
-                <p style="color:#888;font-size:0.8em;margin-bottom:15px;">Sector and other data will be auto-detected</p>
-                <button type="submit" class="btn btn-primary" style="width:100%;">Add Stock</button>
-            </form>
+            <div class="modal-header"><h3>Add Stock</h3><button class="modal-close" onclick="closeModal('add-stock')">&times;</button></div>
+            <div class="modal-body">
+                <form method="POST" action="/watchlist/add">
+                    <div class="form-group"><label>Symbol</label><input type="text" name="symbol" placeholder="AAPL" required style="text-transform:uppercase"></div>
+                    <button type="submit" class="btn btn-primary" style="width:100%">Add</button>
+                </form>
+            </div>
         </div>
     </div>
     
     <script>
         function openModal(id){document.getElementById(id).classList.add('active')}
         function closeModal(id){document.getElementById(id).classList.remove('active')}
-        document.querySelectorAll('.modal').forEach(m=>m.addEventListener('click',e=>{if(e.target.classList.contains('modal'))closeModal(e.target.id)}));
     </script>
 </body>
 </html>
 '''
 
-def get_data(force_refresh=False):
-    """Get all data with caching (60 second TTL)"""
-    cache_key = 'page_data'
-    
-    # Return cached if available and not forcing refresh
-    if not force_refresh:
-        cached = cache_get(cache_key)
-        if cached:
-            return cached
-    
-    # Fetch fresh data
-    market = get_market_snapshot_dict(api)
-    positions = {}
-    pos_list = []
-    total_pnl = 0
-    if manager:
-        for pid, pos in manager.positions.items():
-            try:
-                summary = manager.get_summary(pos)
-                summary['rec'] = get_recommendation_dict(pos) if HAS_MANAGER else None
-                positions[pid] = summary
-                pos_list.append(pos)
-                total_pnl += summary.get('pnl_dollars', 0)
-            except: pass
-    portfolio = get_portfolio_risk_dict(pos_list, CAPITAL)
-    journal_data = get_journal_dict(journal)
-    try:
-        hot_list = get_hot_list_data(scanner).get('hot_list', [])
-    except:
-        hot_list = []
-    
-    # Cache the result for 60 seconds
-    result = (market, positions, portfolio, journal_data, total_pnl, hot_list)
-    cache_set(cache_key, result, 60)
-    return result
+
+# ============================================================================
+# ROUTES
+# ============================================================================
 
 @app.route('/')
-def dashboard():
-    market, positions, portfolio, journal_data, total_pnl, hot_list = get_data()
-    return render_template_string(HTML, tab='dashboard', market=market, positions=positions, portfolio=portfolio, journal_data=journal_data, total_pnl=total_pnl, hot_list=hot_list, hot_count=len(hot_list), watchlist=list(scanner.watchlist.values()))
-
-@app.route('/advisor')
-def advisor_tab():
-    market, positions, portfolio, journal_data, total_pnl, hot_list = get_data()
-    ai_briefing = get_advisor_briefing_dict(advisor, market, positions, portfolio, hot_list, journal_data, list(scanner.watchlist.values()))
-    return render_template_string(HTML, tab='advisor', market=market, positions=positions, portfolio=portfolio, journal_data=journal_data, total_pnl=total_pnl, hot_list=hot_list, hot_count=len(hot_list), watchlist=list(scanner.watchlist.values()), ai_briefing=ai_briefing)
-
-@app.route('/scanner')
-def scanner_tab():
-    market, positions, portfolio, journal_data, total_pnl, hot_list = get_data()
-    
-    # Check for AI scan results
-    ai_scan_results = cache_get('ai_scan_results')
-    ai_hot_list = cache_get('ai_hot_list')
-    
-    # Use AI hot list if available, otherwise regular
-    display_hot_list = ai_hot_list if ai_hot_list else hot_list
-    
-    return render_template_string(HTML, tab='scanner', market=market, positions=positions, portfolio=portfolio, 
-                                  journal_data=journal_data, total_pnl=total_pnl, 
-                                  hot_list=display_hot_list, hot_count=len(display_hot_list), 
-                                  watchlist=list(scanner.watchlist.values()),
-                                  ai_scan_results=ai_scan_results)
+def index():
+    categorized = get_results_by_category()
+    scan_stats = get_scan_stats()
+    positions = position_get_all('OPEN')
+    return render_template_string(HTML,
+        tab='scanner', categorized=categorized, scan_stats=scan_stats,
+        is_market_open=is_market_hours(),
+        ready_count=len(categorized.get('READY_NOW', [])),
+        position_count=len(positions))
 
 @app.route('/scan')
-def scan():
-    try: scanner.scan_watchlist()
-    except: pass
-    return redirect(url_for('scanner_tab'))
-
-@app.route('/quick-scan')
-def quick_scan():
-    """Quick technical scan without AI"""
-    try: scanner.scan_watchlist()
-    except: pass
-    return redirect(url_for('scanner_tab'))
-
-@app.route('/ai-scan')
-def ai_scan():
-    """Deep AI-powered scan using Claude"""
-    import requests
-    
-    if not anthropic_key or not stored_watchlist:
-        return redirect(url_for('scanner_tab'))
-    
-    # Get price data for each stock
-    stock_data = []
-    for symbol in stored_watchlist.keys():
-        try:
-            # Get current price from Polygon
-            if api:
-                quote = api.get_quote(symbol)
-                price = quote.get('price', quote.get('last', {}).get('price', 100))
-                change_pct = quote.get('change_pct', quote.get('todaysChangePerc', 0))
-            else:
-                price = 100
-                change_pct = 0
-            
-            stock_data.append({
-                'symbol': symbol,
-                'price': price,
-                'change_pct': change_pct,
-                'sector': stored_watchlist[symbol].get('sector', 'Unknown')
-            })
-        except:
-            stock_data.append({
-                'symbol': symbol,
-                'price': 100,
-                'change_pct': 0,
-                'sector': stored_watchlist[symbol].get('sector', 'Unknown')
-            })
-    
-    # Build prompt for Claude
-    stocks_str = "\n".join([f"- {s['symbol']}: ${s['price']:.2f} ({s['change_pct']:+.1f}% today) - {s['sector']}" for s in stock_data])
-    
-    prompt = f"""You are an expert options trader specializing in breakouts and momentum continuations. Analyze these stocks and identify the best trading opportunities.
-
-WATCHLIST:
-{stocks_str}
-
-For each stock, analyze:
-1. Is this a BREAKOUT setup (breaking key resistance/support) or CONTINUATION setup (trending with pullback entry)?
-2. What's the probability this trade works (estimate %)?
-3. What's the ideal options trade (CALL or PUT, strike, expiration ~2-3 weeks out)?
-
-Respond in this exact JSON format:
-{{
-    "market_context": "Brief overall market assessment for options trading today",
-    "top_pick": {{
-        "symbol": "BEST_SYMBOL",
-        "reason": "Why this is the #1 pick right now"
-    }},
-    "analysis": [
-        {{
-            "symbol": "SYMBOL",
-            "rank": 1,
-            "setup_quality": "A+/A/B/C",
-            "hot_score": 85,
-            "setup_type": "BREAKOUT" or "CONTINUATION",
-            "headline": "One line why this is hot",
-            "key_levels": {{"entry": 150.00, "target": 160.00, "stop": 145.00}},
-            "options_rec": {{
-                "direction": "CALL" or "PUT",
-                "strike": 155,
-                "expiration": "2025-01-17",
-                "est_premium": 3.50,
-                "rationale": "Why this specific contract"
-            }},
-            "risk_reward": "1:3",
-            "win_probability": 65,
-            "timeframe": "5-10 days",
-            "ai_notes": "Key insight or warning"
-        }}
-    ]
-}}
-
-Rank from best to worst opportunity. Be specific with price levels. Only include stocks worth trading."""
-
-    try:
-        response = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": anthropic_key,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json"
-            },
-            json={
-                "model": claude_model,
-                "max_tokens": 2000,
-                "messages": [{"role": "user", "content": prompt}]
-            },
-            timeout=60
-        )
-        
-        if response.status_code == 200:
-            import json
-            text = response.json()["content"][0]["text"]
-            
-            # Extract JSON from response
-            try:
-                # Find JSON in response
-                start = text.find('{')
-                end = text.rfind('}') + 1
-                if start >= 0 and end > start:
-                    json_str = text[start:end]
-                    result = json.loads(json_str)
-                    
-                    # Store in cache for display
-                    cache_set('ai_scan_results', {
-                        'market_context': result.get('market_context', ''),
-                        'top_pick': result.get('top_pick')
-                    }, 300)
-                    
-                    # Convert to hot_list format
-                    hot_list = []
-                    for item in result.get('analysis', []):
-                        hot_list.append({
-                            'symbol': item.get('symbol', ''),
-                            'rank': item.get('rank', 99),
-                            'setup_quality': item.get('setup_quality', 'C'),
-                            'hot_score': item.get('hot_score', 50),
-                            'setup_type': item.get('setup_type', ''),
-                            'headline': item.get('headline', ''),
-                            'change_pct': next((s['change_pct'] for s in stock_data if s['symbol'] == item.get('symbol')), 0),
-                            'key_levels': item.get('key_levels'),
-                            'options_rec': item.get('options_rec'),
-                            'risk_reward': item.get('risk_reward'),
-                            'win_probability': item.get('win_probability'),
-                            'timeframe': item.get('timeframe'),
-                            'ai_notes': item.get('ai_notes')
-                        })
-                    
-                    # Store hot list
-                    cache_set('ai_hot_list', hot_list, 300)
-                    
-            except json.JSONDecodeError as e:
-                print(f"JSON parse error: {e}")
-                
-    except Exception as e:
-        print(f"AI scan error: {e}")
-    
-    return redirect(url_for('scanner_tab'))
-
-@app.route('/analyze/<symbol>')
-def analyze(symbol):
-    market, positions, portfolio, journal_data, total_pnl, hot_list = get_data()
-    analysis = get_stock_analysis_data(scanner, symbol.upper())
-    return render_template_string(HTML, tab='analysis', market=market, positions=positions, portfolio=portfolio, journal_data=journal_data, total_pnl=total_pnl, hot_list=hot_list, hot_count=len(hot_list), watchlist=list(scanner.watchlist.values()), analysis=analysis)
-
-@app.route('/add-watchlist', methods=['POST'])
-def add_watchlist():
-    symbol = request.form.get('symbol', '').upper().strip()
-    if symbol:
-        # Auto-detect sector based on common stocks
-        sector_map = {
-            # Technology
-            'AAPL': 'Technology', 'MSFT': 'Technology', 'GOOGL': 'Technology', 'GOOG': 'Technology',
-            'META': 'Technology', 'NVDA': 'Technology', 'AMD': 'Technology', 'INTC': 'Technology',
-            'CRM': 'Technology', 'ADBE': 'Technology', 'ORCL': 'Technology', 'CSCO': 'Technology',
-            'AVGO': 'Technology', 'TXN': 'Technology', 'QCOM': 'Technology', 'MU': 'Technology',
-            'NFLX': 'Technology', 'TSLA': 'Technology', 'UBER': 'Technology', 'LYFT': 'Technology',
-            # Healthcare
-            'JNJ': 'Healthcare', 'UNH': 'Healthcare', 'PFE': 'Healthcare', 'ABBV': 'Healthcare',
-            'MRK': 'Healthcare', 'LLY': 'Healthcare', 'TMO': 'Healthcare', 'ABT': 'Healthcare',
-            'BMY': 'Healthcare', 'AMGN': 'Healthcare', 'GILD': 'Healthcare', 'MRNA': 'Healthcare',
-            # Financials
-            'JPM': 'Financials', 'BAC': 'Financials', 'WFC': 'Financials', 'GS': 'Financials',
-            'MS': 'Financials', 'C': 'Financials', 'BLK': 'Financials', 'SCHW': 'Financials',
-            'AXP': 'Financials', 'V': 'Financials', 'MA': 'Financials', 'PYPL': 'Financials',
-            # Consumer
-            'AMZN': 'Consumer', 'WMT': 'Consumer', 'HD': 'Consumer', 'NKE': 'Consumer',
-            'MCD': 'Consumer', 'SBUX': 'Consumer', 'TGT': 'Consumer', 'COST': 'Consumer',
-            'DIS': 'Consumer', 'CMCSA': 'Consumer', 'PEP': 'Consumer', 'KO': 'Consumer',
-            # Energy
-            'XOM': 'Energy', 'CVX': 'Energy', 'COP': 'Energy', 'SLB': 'Energy',
-            'EOG': 'Energy', 'OXY': 'Energy', 'PSX': 'Energy', 'VLO': 'Energy',
-            # Industrial
-            'CAT': 'Industrial', 'BA': 'Industrial', 'HON': 'Industrial', 'UPS': 'Industrial',
-            'DE': 'Industrial', 'GE': 'Industrial', 'MMM': 'Industrial', 'LMT': 'Industrial',
-            # ETFs
-            'SPY': 'ETF', 'QQQ': 'ETF', 'IWM': 'ETF', 'DIA': 'ETF', 'VTI': 'ETF',
-            'XLF': 'ETF', 'XLE': 'ETF', 'XLK': 'ETF', 'ARKK': 'ETF', 'GLD': 'ETF',
-        }
-        sector = sector_map.get(symbol, 'Other')
-        
-        scanner.add_to_watchlist(symbol, '', sector, '')
-        # Save to database
-        stored_watchlist[symbol] = {'symbol': symbol, 'sector': sector}
-        save_watchlist()
-    return redirect(url_for('scanner_tab'))
-
-@app.route('/remove-watchlist/<symbol>')
-def remove_watchlist(symbol):
-    scanner.remove_from_watchlist(symbol)
-    # Remove from database
-    if symbol in stored_watchlist:
-        del stored_watchlist[symbol]
-        save_watchlist()
-    return redirect(url_for('scanner_tab'))
+def trigger_scan():
+    scan_watchlist(CAPITAL)
+    return redirect(url_for('index'))
 
 @app.route('/positions')
-def positions_tab():
-    market, positions, portfolio, journal_data, total_pnl, hot_list = get_data()
-    # Merge database positions with manager positions
-    all_positions = {**stored_positions, **positions}
-    return render_template_string(HTML, tab='positions', market=market, positions=all_positions, portfolio=portfolio, journal_data=journal_data, total_pnl=total_pnl, hot_list=hot_list, hot_count=len(hot_list), watchlist=list(scanner.watchlist.values()))
-
-@app.route('/add', methods=['GET', 'POST'])
-def add_position():
-    if request.method == 'POST':
-        try:
-            symbol = request.form.get('symbol', '').upper()
-            pos_type = request.form.get('type', 'LONG_CALL')
-            strike = float(request.form.get('strike', 0))
-            expiration = request.form.get('expiration', '')
-            contracts = int(request.form.get('contracts', 1))
-            entry_price = float(request.form.get('entry_price', 0))
-            
-            if symbol and strike and entry_price:
-                # Create unique position ID
-                import uuid
-                pos_id = f"{symbol}_{strike}_{uuid.uuid4().hex[:6]}"
-                
-                # Save to database
-                stored_positions[pos_id] = {
-                    'symbol': symbol,
-                    'type': pos_type,
-                    'strike': strike,
-                    'expiration': expiration,
-                    'contracts': contracts,
-                    'entry_option': entry_price,
-                    'current_option': entry_price,
-                    'entry_price': entry_price,  # for display
-                    'pnl_percent': 0,
-                    'pnl_dollars': 0,
-                    'dte': 30,  # placeholder
-                    'delta': 0.50,  # placeholder
-                    'created': datetime.now().isoformat()
-                }
-                save_positions()
-                
-                # Also add to manager if available
-                if manager:
-                    try:
-                        from pro_manager import Position, PositionType
-                        ptype = PositionType.LONG_CALL if 'CALL' in pos_type else PositionType.LONG_PUT
-                        pos = Position(
-                            symbol=symbol,
-                            position_type=ptype,
-                            strike=strike,
-                            expiration=expiration,
-                            contracts=contracts,
-                            entry_option_price=entry_price
-                        )
-                        manager.add_position(pos)
-                    except:
-                        pass
-                
-            return redirect(url_for('positions_tab'))
-        except Exception as e:
-            print(f"Add position error: {e}")
-            return redirect(url_for('positions_tab'))
+def positions_view():
+    positions = position_get_all('OPEN')
+    categorized = get_results_by_category()
     
-    # GET - show form
-    add_form = '''
-    <!DOCTYPE html><html><head>
-    <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Add Position</title>
-    <style>
-        *{margin:0;padding:0;box-sizing:border-box}
-        body{font-family:-apple-system,sans-serif;background:#0a0a12;color:#e0e0e0;min-height:100vh;padding:20px}
-        .container{max-width:500px;margin:0 auto}
-        h1{margin-bottom:20px;color:#00d4ff}
-        .form-group{margin-bottom:15px}
-        label{display:block;margin-bottom:5px;color:#888}
-        input,select{width:100%;padding:12px;border:1px solid rgba(255,255,255,0.2);border-radius:8px;background:rgba(255,255,255,0.05);color:white;font-size:1em}
-        .btn{padding:12px 24px;border:none;border-radius:8px;cursor:pointer;font-weight:600;margin-right:10px}
-        .btn-primary{background:linear-gradient(135deg,#00d4ff,#0099cc);color:white}
-        .btn-secondary{background:rgba(255,255,255,0.1);color:white;text-decoration:none;display:inline-block}
-    </style>
-    </head><body>
-    <div class="container">
-        <h1>➕ Add Position</h1>
-        <form method="POST">
-            <div class="form-group"><label>Symbol</label><input type="text" name="symbol" required placeholder="AAPL" style="text-transform:uppercase"></div>
-            <div class="form-group"><label>Type</label><select name="type"><option value="LONG_CALL">Long Call</option><option value="LONG_PUT">Long Put</option></select></div>
-            <div class="form-group"><label>Strike Price</label><input type="number" name="strike" step="0.5" required placeholder="150"></div>
-            <div class="form-group"><label>Expiration</label><input type="date" name="expiration" required></div>
-            <div class="form-group"><label>Contracts</label><input type="number" name="contracts" value="1" min="1"></div>
-            <div class="form-group"><label>Entry Price (per contract)</label><input type="number" name="entry_price" step="0.01" required placeholder="3.50"></div>
-            <button type="submit" class="btn btn-primary">Add Position</button>
-            <a href="/positions" class="btn btn-secondary">Cancel</a>
-        </form>
-    </div>
-    </body></html>
-    '''
-    return add_form
-
-@app.route('/market')
-def market_tab():
-    market, positions, portfolio, journal_data, total_pnl, hot_list = get_data()
-    return render_template_string(HTML, tab='market', market=market, positions=positions, portfolio=portfolio, journal_data=journal_data, total_pnl=total_pnl, hot_list=hot_list, hot_count=len(hot_list), watchlist=list(scanner.watchlist.values()))
-
-@app.route('/risk')
-def risk_tab():
-    market, positions, portfolio, journal_data, total_pnl, hot_list = get_data()
-    return render_template_string(HTML, tab='risk', market=market, positions=positions, portfolio=portfolio, journal_data=journal_data, total_pnl=total_pnl, hot_list=hot_list, hot_count=len(hot_list), watchlist=list(scanner.watchlist.values()))
+    # Get enhanced portfolio analysis
+    portfolio = None
+    if positions:
+        portfolio = analyze_portfolio(positions)
+    
+    # Build HTML with positions template embedded
+    full_html = HTML.replace(
+        '{% elif tab == \'positions\' %}',
+        '{% elif tab == \'positions\' %}' + POSITIONS_HTML.replace("'''", "")
+    )
+    
+    return render_template_string(HTML,
+        tab='positions', positions=positions, portfolio=portfolio,
+        is_market_open=is_market_hours(),
+        ready_count=len(categorized.get('READY_NOW', [])),
+        position_count=len(positions))
 
 @app.route('/journal')
-def journal_tab():
-    market, positions, portfolio, journal_data, total_pnl, hot_list = get_data()
-    return render_template_string(HTML, tab='journal', market=market, positions=positions, portfolio=portfolio, journal_data=journal_data, total_pnl=total_pnl, hot_list=hot_list, hot_count=len(hot_list), watchlist=list(scanner.watchlist.values()))
+def journal_view():
+    journal = journal_get_all(50)
+    stats = journal_get_statistics()
+    categorized = get_results_by_category()
+    positions = position_get_all('OPEN')
+    return render_template_string(HTML,
+        tab='journal', journal=journal, stats=stats, is_market_open=is_market_hours(),
+        ready_count=len(categorized.get('READY_NOW', [])),
+        position_count=len(positions))
 
-@app.route('/refresh')
-def refresh():
-    # Clear cache to force fresh data
-    global _cache, _cache_expiry
-    _cache = {}
-    _cache_expiry = {}
-    if manager and api: manager.update_all()
-    return redirect(request.referrer or url_for('dashboard'))
+@app.route('/mentor')
+def mentor_view():
+    stats = journal_get_statistics()
+    categorized = get_results_by_category()
+    positions = position_get_all('OPEN')
+    briefing = settings_get('daily_briefing')
+    patterns = settings_get('pattern_analysis')
+    return render_template_string(HTML,
+        tab='mentor', stats=stats, briefing=briefing, patterns=patterns,
+        is_market_open=is_market_hours(),
+        ready_count=len(categorized.get('READY_NOW', [])),
+        position_count=len(positions))
 
-@app.route('/delete/<pos_id>')
-def delete(pos_id):
-    # Remove from database
-    if pos_id in stored_positions:
-        del stored_positions[pos_id]
-        save_positions()
-    # Also remove from manager
-    if manager: 
-        try:
-            manager.remove_position(pos_id)
-        except:
-            pass
-    return redirect(url_for('positions_tab'))
+@app.route('/settings', methods=['GET', 'POST'])
+def settings_view():
+    if request.method == 'POST':
+        settings_set('capital', float(request.form.get('capital', 100000)))
+        settings_set('tier_a_pct', int(request.form.get('tier_a_pct', 30)))
+        settings_set('tier_b_reduction', int(request.form.get('tier_b_reduction', 25)))
+        settings_set('tier_c_reduction', int(request.form.get('tier_c_reduction', 50)))
+        settings_set('target_delta', float(request.form.get('target_delta', 0.50)))
+        settings_set('min_dte', int(request.form.get('min_dte', 30)))
+        settings_set('max_dte', int(request.form.get('max_dte', 45)))
+        return redirect(url_for('settings_view'))
+    
+    watchlist = watchlist_get_all()
+    categorized = get_results_by_category()
+    positions = position_get_all('OPEN')
+    settings = {
+        'capital': settings_get('capital', 100000),
+        'tier_a_pct': settings_get('tier_a_pct', 30),
+        'tier_b_reduction': settings_get('tier_b_reduction', 25),
+        'tier_c_reduction': settings_get('tier_c_reduction', 50),
+        'target_delta': settings_get('target_delta', 0.50),
+        'min_dte': settings_get('min_dte', 30),
+        'max_dte': settings_get('max_dte', 45)
+    }
+    return render_template_string(HTML,
+        tab='settings', settings=settings, watchlist=watchlist,
+        is_market_open=is_market_hours(),
+        ready_count=len(categorized.get('READY_NOW', [])),
+        position_count=len(positions))
+
+@app.route('/watchlist/add', methods=['POST'])
+def add_to_watchlist():
+    symbol = request.form.get('symbol', '').upper().strip()
+    if symbol:
+        sector_map = {'AAPL':'Tech','MSFT':'Tech','NVDA':'Tech','GOOGL':'Tech','AMZN':'Consumer','TSLA':'Auto','META':'Tech','AMD':'Tech','JPM':'Fin','BAC':'Fin','SPY':'ETF','QQQ':'ETF','SNAP':'Tech','BIDU':'Tech'}
+        watchlist_add(symbol, sector_map.get(symbol, 'Other'))
+    return redirect(url_for('index'))
+
+@app.route('/watchlist/remove/<symbol>')
+def remove_from_watchlist(symbol):
+    watchlist_remove(symbol.upper())
+    return redirect(url_for('settings_view'))
+
+@app.route('/execute/<symbol>')
+def execute_trade(symbol):
+    results = get_cached_results()
+    scan_data = next((r for r in results if r['symbol'] == symbol.upper()), None)
+    if not scan_data:
+        return redirect(url_for('index'))
+    
+    opts = scan_data.get('options', {}) or {}
+    contract = opts.get('recommended_contract', {}) or {}
+    
+    position_add({
+        'symbol': symbol.upper(),
+        'direction': scan_data.get('setup_direction', 'CALL'),
+        'setup_type': scan_data.get('setup_type'),
+        'tier': scan_data.get('tier'),
+        'entry_price': contract.get('mid'),
+        'entry_delta': contract.get('delta'),
+        'entry_iv': scan_data.get('iv_percentile'),
+        'entry_underlying': scan_data.get('price'),
+        'strike': contract.get('strike'),
+        'expiration': contract.get('expiration'),
+        'contracts': opts.get('num_contracts', 1),
+        'target_price': opts.get('target_price'),
+        'stop_price': opts.get('stop_price'),
+        'scan_data': scan_data
+    })
+    return redirect(url_for('positions_view'))
 
 @app.route('/close/<pos_id>')
-def close(pos_id):
-    # Log to journal and remove from database
-    if pos_id in stored_positions:
-        pos_data = stored_positions[pos_id]
-        # Add to journal
-        stored_journal.append({
-            'symbol': pos_data.get('symbol', ''),
-            'type': pos_data.get('type', ''),
-            'entry_price': pos_data.get('entry_option', 0),
-            'exit_price': pos_data.get('current_option', pos_data.get('entry_option', 0)),
-            'pnl': pos_data.get('pnl_dollars', 0),
-            'net_pnl': pos_data.get('pnl_dollars', 0),
-            'exit_date': datetime.now().strftime('%Y-%m-%d'),
-            'exit_reason': 'MANUAL'
-        })
-        save_journal()
-        del stored_positions[pos_id]
-        save_positions()
+def close_position(pos_id):
+    pos = position_get(pos_id)
+    if not pos:
+        return redirect(url_for('positions_view'))
+    exit_price = float(request.args.get('price', pos.get('entry_price', 0)))
+    position_close(pos_id, exit_price, 'MANUAL')
     
-    # Also handle manager positions
-    if manager and pos_id in manager.positions:
-        pos = manager.positions[pos_id]
-        journal.log_from_position(pos, "MANUAL")
-        manager.remove_position(pos_id)
-    return redirect(url_for('positions_tab'))
+    journal_entries = journal_get_all(1)
+    if journal_entries:
+        review_data = review_trade(dict(journal_entries[0]))
+        journal_update_review(journal_entries[0]['id'], review_data['review'], review_data['lessons'])
+    return redirect(url_for('journal_view'))
 
-@app.route('/manifest.json')
-def manifest():
+@app.route('/analyze/<symbol>')
+def analyze_symbol(symbol):
+    result = quick_scan_symbol(symbol.upper())
+    if not result:
+        return jsonify({'error': 'Could not analyze'})
+    advice = get_entry_advice(result, result.get('options'))
+    result['ai_advice'] = advice
+    return jsonify(result)
+
+@app.route('/generate-briefing')
+def generate_briefing_route():
+    results = get_cached_results()
+    stats = journal_get_statistics()
+    positions = position_get_all('OPEN')
+    briefing = generate_daily_briefing(results, stats, positions)
+    settings_set('daily_briefing', briefing)
+    return redirect(url_for('mentor_view'))
+
+@app.route('/analyze-patterns')
+def analyze_patterns_route():
+    stats = journal_get_statistics()
+    journal = journal_get_all(50)
+    patterns = analyze_patterns(stats, journal)
+    settings_set('pattern_analysis', patterns)
+    return redirect(url_for('mentor_view'))
+
+@app.route('/api/scan-results')
+def api_scan_results():
+    return jsonify(get_results_by_category())
+
+@app.route('/api/positions')
+def api_positions():
+    return jsonify(position_get_all('OPEN'))
+
+@app.route('/api/stats')
+def api_stats():
+    return jsonify(journal_get_statistics())
+
+@app.route('/position/<symbol>')
+def position_detail(symbol):
+    """Detailed position view with news and market context"""
+    positions = position_get_all('OPEN')
+    pos = next((p for p in positions if p.get('symbol') == symbol.upper()), None)
+    
+    if not pos:
+        return redirect(url_for('positions_view'))
+    
+    # Get detailed analysis
+    analysis = analyze_position(pos)
+    
+    # Get market context
+    market_context = get_position_market_context(symbol)
+    
+    # Get news
+    dte = analysis.time.dte if analysis else 30
+    news_summary = get_position_news_summary(symbol, dte)
+    
     return jsonify({
-        "name": "Trading Cockpit",
-        "short_name": "Cockpit",
-        "start_url": "/",
-        "display": "standalone",
-        "background_color": "#0a0a12",
-        "theme_color": "#0a0a12",
-        "icons": [{"src": "/icon.png", "sizes": "192x192", "type": "image/png"}]
+        'position': analysis.to_dict() if analysis else {},
+        'market_context': market_context,
+        'news': news_summary
     })
 
-@app.route('/health')
-def health():
-    return jsonify({"status": "ok"})
+@app.route('/api/portfolio')
+def api_portfolio():
+    """Get full portfolio analysis"""
+    positions = position_get_all('OPEN')
+    if not positions:
+        return jsonify({'error': 'No positions'})
+    
+    portfolio = analyze_portfolio(positions)
+    return jsonify(portfolio)
+
+@app.route('/api/market')
+def api_market():
+    """Get market snapshot"""
+    return jsonify(get_market_snapshot())
+
 
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))
-    print(f"\n  🚀 Trading Cockpit running on port {port}")
-    print(f"  📱 Mobile + Web ready!\n")
-    app.run(host='0.0.0.0', port=port, debug=False)
+    app.run(host='0.0.0.0', port=port, debug=os.getenv('DEBUG', 'false').lower() == 'true')
