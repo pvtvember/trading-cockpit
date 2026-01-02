@@ -1,406 +1,302 @@
 """
-Trading Cockpit - AI Trading Advisor
-=====================================
-Claude-powered advisor that analyzes ALL your data:
-- Market conditions
-- Open positions
-- Portfolio risk
-- Watchlist opportunities
-- Trade journal performance
-
-Provides a comprehensive daily briefing and real-time advice.
+AI Trading Advisor - Expert Mentor Voice
+=========================================
+Replace your existing ai_advisor.py with this version.
+Same functions, but speaks like a senior trading mentor.
 """
 
 import os
-import json
+import time
+import requests
 from datetime import datetime
 from typing import Dict, List, Optional
-from dataclasses import dataclass, field
-import requests
+from dataclasses import dataclass
+
+# Simple cache
+_cache = {}
+_cache_expiry = {}
+
+def get_cached(key):
+    if key in _cache and time.time() < _cache_expiry.get(key, 0):
+        return _cache[key]
+    return None
+
+def set_cached(key, value, ttl=300):
+    _cache[key] = value
+    _cache_expiry[key] = time.time() + ttl
 
 
 @dataclass
 class AdvisorBriefing:
-    """Complete AI advisor briefing"""
-    # Summary
-    headline: str = ""
-    market_summary: str = ""
-    
-    # Sections
-    market_outlook: str = ""
+    """Expert advisor briefing"""
+    has_content: bool = False
+    market_assessment: str = ""
     position_review: str = ""
-    risk_assessment: str = ""
-    opportunities: str = ""
-    action_items: List[str] = field(default_factory=list)
-    
-    # Warnings
-    warnings: List[str] = field(default_factory=list)
-    
-    # Detailed advice
-    what_to_do_today: str = ""
-    what_to_avoid: str = ""
-    
-    # Performance insight
-    performance_insight: str = ""
-    
-    # Raw response
-    full_response: str = ""
-    
-    # Meta
+    todays_playbook: str = ""
+    risk_advisory: str = ""
+    raw_response: str = ""
     generated_at: str = ""
     model_used: str = ""
 
 
-class AITradingAdvisor:
+class ExpertAdvisor:
     """
-    Claude-powered trading advisor that sees everything
-    and provides actionable advice.
+    AI Trading Advisor with expert mentor voice.
+    Speaks with authority, gives specific actionable guidance.
     """
     
     def __init__(self, api_key: str = None, model: str = None):
-        self.api_key = api_key or os.getenv('ANTHROPIC_API_KEY')
-        # Allow user to specify model - default to Opus 4.5 if available
+        self.api_key = api_key or os.getenv('ANTHROPIC_API_KEY', '')
         self.model = model or os.getenv('CLAUDE_MODEL', 'claude-sonnet-4-20250514')
-        self.base_url = "https://api.anthropic.com/v1/messages"
     
-    def set_model(self, model: str):
-        """Change the model (e.g., to opus)"""
-        self.model = model
-    
-    def get_briefing(self, 
-                     market_data: Dict,
-                     positions: Dict,
-                     portfolio_risk: Dict,
-                     hot_list: List[Dict],
-                     journal_stats: Dict,
-                     watchlist: List[Dict]) -> AdvisorBriefing:
+    def get_briefing(self, market_data: Dict, positions: List[Dict], 
+                     journal_stats: Dict, watchlist_hot: List[Dict] = None) -> AdvisorBriefing:
         """
-        Generate comprehensive AI briefing based on all data.
+        Get expert trading briefing.
+        
+        Args:
+            market_data: Dict with vix, spy_change, headline, etc.
+            positions: List of position dicts with symbol, strike, type, pnl_pct, dte
+            journal_stats: Dict with win_rate, total_pnl, total_trades
+            watchlist_hot: Optional list of hot stocks from scanner
+        
+        Returns:
+            AdvisorBriefing with parsed sections
         """
-        briefing = AdvisorBriefing(
-            generated_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            model_used=self.model
-        )
+        
+        # Check cache first
+        cached = get_cached("advisor_briefing")
+        if cached:
+            return cached
         
         if not self.api_key:
-            briefing.headline = "⚠️ AI Advisor Not Connected"
-            briefing.market_summary = "Add your ANTHROPIC_API_KEY to .env to enable AI advisor"
-            briefing.action_items = ["Add ANTHROPIC_API_KEY to .env file"]
-            return briefing
+            return AdvisorBriefing(has_content=False)
         
-        # Build comprehensive prompt
-        prompt = self._build_prompt(market_data, positions, portfolio_risk, 
-                                    hot_list, journal_stats, watchlist)
-        
-        # Call Claude
-        try:
-            response = self._call_claude(prompt)
-            briefing = self._parse_response(response, briefing)
-        except Exception as e:
-            briefing.headline = f"⚠️ AI Error: {str(e)[:50]}"
-            briefing.market_summary = "Could not generate AI briefing. Check API key."
-        
-        return briefing
-    
-    def _build_prompt(self, market: Dict, positions: Dict, risk: Dict,
-                      hot_list: List, journal: Dict, watchlist: List) -> str:
-        """Build comprehensive prompt with all data"""
-        
-        # Format positions
-        pos_text = "No open positions."
+        # Build position summary
         if positions:
             pos_lines = []
-            for pid, p in positions.items():
-                pos_lines.append(f"- {p.get('symbol')} {p.get('strike')}{p.get('type','')[:1]}: "
-                               f"{p.get('pnl_percent', 0):+.0f}% P&L, {p.get('dte', 0)} DTE, "
-                               f"Score: {p.get('score_grade', 'N/A')}, Status: {p.get('status', 'N/A')}")
-            pos_text = "\n".join(pos_lines)
+            for p in positions:
+                symbol = p.get('symbol', 'UNK')
+                strike = p.get('strike', 0)
+                ptype = 'C' if 'CALL' in p.get('type', '') else 'P'
+                pnl = p.get('pnl_pct', p.get('pnl_percent', 0))
+                dte = p.get('dte', 0)
+                entry = p.get('entry_price', p.get('entry', 0))
+                current = p.get('current_price', p.get('current', entry))
+                delta = p.get('delta', 0.5)
+                
+                pos_lines.append(
+                    f"- {symbol} {strike}{ptype}: {pnl:+.0f}% P&L, {dte} DTE, "
+                    f"entry ${entry:.2f}, current ${current:.2f}, delta {delta:.2f}"
+                )
+            pos_summary = "\n".join(pos_lines)
+        else:
+            pos_summary = "No open positions - fully in cash."
         
-        # Format hot list
-        hot_text = "No hot setups currently."
-        if hot_list:
-            hot_lines = []
-            for h in hot_list[:5]:
-                rec = h.get('options_rec', {})
-                hot_lines.append(f"- {h.get('symbol')}: Score {h.get('hot_score', 0):.0f}, "
-                               f"Quality: {h.get('setup_quality')}, Signal: {h.get('signal')}, "
-                               f"Rec: {rec.get('direction', 'N/A')} ${rec.get('strike', 'N/A')}")
-            hot_text = "\n".join(hot_lines)
+        # Build watchlist summary
+        if watchlist_hot:
+            hot_lines = [f"- {h.get('symbol', '')}: {h.get('headline', '')} (Grade {h.get('grade', h.get('setup_quality', 'C'))})" 
+                        for h in watchlist_hot[:5]]
+            hot_summary = "\n".join(hot_lines)
+        else:
+            hot_summary = "No watchlist data available."
         
-        # Format watchlist
-        wl_text = f"{len(watchlist)} stocks" if watchlist else "Empty"
+        # Extract market data
+        vix = market_data.get('vix', market_data.get('vix_level', 18))
+        spy_change = market_data.get('spy_change', market_data.get('spy_chg', 0))
+        if isinstance(market_data.get('spy'), dict):
+            spy_change = market_data['spy'].get('change_pct', 0)
+        if isinstance(market_data.get('vix'), dict):
+            vix = market_data['vix'].get('level', 18)
         
-        prompt = f"""You are an expert options trading advisor. Analyze this trader's complete situation and provide actionable advice.
-
-## CURRENT MARKET CONDITIONS
-- Regime: {market.get('regime', 'Unknown')}
-- Headline: {market.get('headline', 'N/A')}
-- VIX: {market.get('vix', {}).get('level', 'N/A')} ({market.get('vix', {}).get('regime', 'N/A')})
-- SPY: {market.get('spy', {}).get('direction', 'N/A')}, {market.get('spy', {}).get('change_pct', 0):+.1f}%
-- Strategy Bias: {market.get('strategy', {}).get('bias', 'N/A')}
-- Preferred Direction: {market.get('strategy', {}).get('preferred_direction', 'N/A')}
-
-## OPEN POSITIONS
-{pos_text}
-
-## PORTFOLIO RISK
-- Total Delta: {risk.get('greeks', {}).get('total_delta', 0):.0f}
-- Daily Theta: ${risk.get('greeks', {}).get('total_theta', 0):.0f}/day
-- Capital at Risk: {risk.get('risk', {}).get('capital_at_risk_pct', 0):.1f}%
-- Position Count: {risk.get('risk', {}).get('position_count', 0)}
-- Risk Level: {risk.get('risk', {}).get('overall_risk', 'N/A')}
-- Concentration: {risk.get('correlation', {}).get('largest_sector', 'N/A')} ({risk.get('correlation', {}).get('largest_sector_pct', 0):.0f}%)
-
-## HOT LIST (Best Setups)
-{hot_text}
-
-## WATCHLIST
-{wl_text}
-
-## TRADING PERFORMANCE (Historical)
-- Total Trades: {journal.get('stats', {}).get('total_trades', 0)}
-- Win Rate: {journal.get('stats', {}).get('win_rate', 0):.0f}%
-- Profit Factor: {journal.get('stats', {}).get('profit_factor', 0):.2f}
-- Expectancy: ${journal.get('stats', {}).get('expectancy', 0):.0f}/trade
-- Current Streak: {journal.get('stats', {}).get('current_streak', 0)}
-
----
-
-Based on ALL of this data, provide a comprehensive trading briefing. Be specific, actionable, and direct. This trader needs clear guidance.
-
-Format your response EXACTLY like this:
-
-HEADLINE: [One powerful sentence summarizing the day's outlook]
-
-MARKET_OUTLOOK:
-[2-3 sentences on market conditions and what they mean for trading today]
-
-POSITION_REVIEW:
-[Review each open position - what to do with each one specifically]
-
-RISK_ASSESSMENT:
-[Assess current portfolio risk - is it too high/low? What adjustments needed?]
-
-OPPORTUNITIES:
-[Which hot list stocks look best? What specific trades to consider?]
-
-ACTION_ITEMS:
-- [Specific action 1]
-- [Specific action 2]
-- [Specific action 3]
-- [Add more as needed]
-
-WARNINGS:
-- [Warning 1 if any]
-- [Warning 2 if any]
-
-WHAT_TO_DO_TODAY:
-[Clear, specific instructions for today's trading session]
-
-WHAT_TO_AVOID:
-[What NOT to do today based on conditions]
-
-PERFORMANCE_INSIGHT:
-[One insight about their trading performance and how to improve]
-
-Be direct and specific. No fluff. This is real money."""
-
-        return prompt
-    
-    def _call_claude(self, prompt: str) -> str:
-        """Call Claude API"""
-        response = requests.post(
-            self.base_url,
-            headers={
-                "x-api-key": self.api_key,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json"
-            },
-            json={
-                "model": self.model,
-                "max_tokens": 2000,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ]
-            },
-            timeout=60
-        )
+        # Journal stats
+        win_rate = journal_stats.get('win_rate', 0)
+        total_pnl = journal_stats.get('total_pnl', 0)
+        total_trades = journal_stats.get('total_trades', journal_stats.get('trades', 0))
+        profit_factor = journal_stats.get('profit_factor', 0)
         
-        if response.status_code != 200:
-            raise Exception(f"API error: {response.status_code} - {response.text[:100]}")
-        
-        result = response.json()
-        return result['content'][0]['text']
-    
-    def _parse_response(self, response: str, briefing: AdvisorBriefing) -> AdvisorBriefing:
-        """Parse Claude's response into structured briefing"""
-        briefing.full_response = response
-        
-        # Parse sections
-        sections = {
-            'HEADLINE:': 'headline',
-            'MARKET_OUTLOOK:': 'market_outlook',
-            'POSITION_REVIEW:': 'position_review',
-            'RISK_ASSESSMENT:': 'risk_assessment',
-            'OPPORTUNITIES:': 'opportunities',
-            'WHAT_TO_DO_TODAY:': 'what_to_do_today',
-            'WHAT_TO_AVOID:': 'what_to_avoid',
-            'PERFORMANCE_INSIGHT:': 'performance_insight',
-        }
-        
-        current_section = None
-        current_content = []
-        
-        for line in response.split('\n'):
-            line_stripped = line.strip()
-            
-            # Check if this is a section header
-            found_section = False
-            for header, attr in sections.items():
-                if line_stripped.startswith(header):
-                    # Save previous section
-                    if current_section:
-                        setattr(briefing, current_section, '\n'.join(current_content).strip())
-                    current_section = attr
-                    # Get content after header on same line
-                    content_after = line_stripped[len(header):].strip()
-                    current_content = [content_after] if content_after else []
-                    found_section = True
-                    break
-            
-            if not found_section and current_section:
-                current_content.append(line)
-            
-            # Parse action items
-            if line_stripped.startswith('ACTION_ITEMS:'):
-                current_section = None
-            elif current_section is None and line_stripped.startswith('- '):
-                if 'WARNING' not in response[response.find(line_stripped)-20:response.find(line_stripped)]:
-                    briefing.action_items.append(line_stripped[2:])
-            
-            # Parse warnings
-            if 'WARNINGS:' in line_stripped:
-                current_section = 'warnings_section'
-            elif current_section == 'warnings_section' and line_stripped.startswith('- '):
-                briefing.warnings.append(line_stripped[2:])
-            elif current_section == 'warnings_section' and line_stripped and not line_stripped.startswith('-'):
-                if any(line_stripped.startswith(h) for h in sections.keys()):
-                    current_section = None
-        
-        # Save last section
-        if current_section and current_section not in ['warnings_section']:
-            setattr(briefing, current_section, '\n'.join(current_content).strip())
-        
-        # Set market summary from outlook
-        briefing.market_summary = briefing.market_outlook[:200] if briefing.market_outlook else ""
-        
-        return briefing
-    
-    def get_quick_advice(self, question: str, context: Dict) -> str:
-        """Get quick advice on a specific question"""
-        if not self.api_key:
-            return "AI advisor not connected. Add ANTHROPIC_API_KEY to .env"
-        
-        prompt = f"""You are an expert options trading advisor. Answer this specific question concisely.
+        prompt = f"""You are a senior options trading advisor with 20+ years of experience managing institutional portfolios. You speak with authority and precision. Your guidance is direct, confident, and actionable - never vague.
 
-CONTEXT:
-- Market: {context.get('market_regime', 'Unknown')}
-- VIX: {context.get('vix', 'N/A')}
-- Open Positions: {context.get('position_count', 0)}
-- Capital at Risk: {context.get('capital_at_risk', 0):.1f}%
+CURRENT MARKET CONDITIONS:
+- VIX: {vix:.1f}
+- SPY: {spy_change:+.1f}% today
+- IV Environment: {'Low - premiums cheap, favor buying' if vix < 16 else 'Normal' if vix < 22 else 'Elevated - premiums rich' if vix < 28 else 'High fear - caution warranted'}
 
-QUESTION: {question}
+CLIENT'S OPEN POSITIONS:
+{pos_summary}
 
-Give a direct, actionable answer in 2-3 sentences."""
+HOT WATCHLIST SETUPS:
+{hot_summary}
+
+CLIENT'S TRACK RECORD:
+- Total trades: {total_trades}
+- Win rate: {win_rate:.0f}%
+- Cumulative P&L: ${total_pnl:,.0f}
+- Profit factor: {profit_factor:.2f}
+
+Provide a concise executive briefing with these exact sections:
+
+**MARKET ASSESSMENT**
+2-3 sentences on what current conditions mean for options trading. Reference VIX, trend, and what strategies are favored.
+
+**POSITION MANAGEMENT**  
+For each open position, give a specific recommendation: HOLD, ADD, TRIM, or EXIT. Include specific price triggers where relevant. If no positions, state the client is in cash and whether that's appropriate given conditions.
+
+**TODAY'S PLAYBOOK**
+1-2 specific, actionable opportunities. Name specific setups, strikes ranges, and timeframes. Be concrete, not generic.
+
+**RISK ADVISORY**
+The single most important risk to monitor today. Be specific - upcoming events, technical levels, or position-specific concerns.
+
+Write as a senior advisor briefing a sophisticated client. Be direct and confident. No hedging language."""
 
         try:
-            response = self._call_claude(prompt)
-            return response
+            response = requests.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": self.api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json"
+                },
+                json={
+                    "model": self.model,
+                    "max_tokens": 800,
+                    "messages": [{"role": "user", "content": prompt}]
+                },
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                text = response.json()["content"][0]["text"]
+                
+                # Parse sections
+                briefing = AdvisorBriefing(
+                    has_content=True,
+                    raw_response=text,
+                    generated_at=datetime.now().strftime("%I:%M %p"),
+                    model_used=self.model
+                )
+                
+                # Extract sections
+                sections = {
+                    "market_assessment": ["MARKET ASSESSMENT", "MARKET"],
+                    "position_review": ["POSITION MANAGEMENT", "POSITIONS", "POSITION REVIEW"],
+                    "todays_playbook": ["TODAY'S PLAYBOOK", "PLAYBOOK", "TODAY"],
+                    "risk_advisory": ["RISK ADVISORY", "RISK", "WARNING"]
+                }
+                
+                for attr, keywords in sections.items():
+                    for keyword in keywords:
+                        if keyword in text.upper():
+                            # Find content after this keyword
+                            start = text.upper().find(keyword)
+                            if start != -1:
+                                # Find the next section or end
+                                end = len(text)
+                                for other_keywords in sections.values():
+                                    for other_kw in other_keywords:
+                                        if other_kw != keyword:
+                                            other_start = text.upper().find(other_kw, start + len(keyword))
+                                            if other_start != -1 and other_start < end:
+                                                end = other_start
+                                
+                                # Extract and clean
+                                content = text[start:end]
+                                # Remove the header line
+                                lines = content.split('\n')
+                                content = '\n'.join(lines[1:]).strip()
+                                content = content.strip('*').strip()
+                                
+                                setattr(briefing, attr, content)
+                                break
+                
+                # Cache for 5 minutes
+                set_cached("advisor_briefing", briefing, 300)
+                return briefing
+                
+            else:
+                print(f"AI API error: {response.status_code} - {response.text}")
+                
         except Exception as e:
-            return f"Error: {str(e)}"
-    
-    def analyze_trade_idea(self, symbol: str, direction: str, 
-                          stock_analysis: Dict, market_data: Dict) -> Dict:
-        """Get AI analysis of a specific trade idea"""
-        if not self.api_key:
-            return {"error": "AI not connected"}
+            print(f"AI request error: {e}")
         
-        prompt = f"""Analyze this trade idea and give your recommendation.
-
-TRADE IDEA:
-- Symbol: {symbol}
-- Direction: {direction}
-- Current Price: ${stock_analysis.get('price', 0):.2f}
-- Technical Score: {stock_analysis.get('hot_score', 0):.0f}/100
-- Setup Quality: {stock_analysis.get('setup_quality', 'N/A')}
-- Trend: {stock_analysis.get('technicals', {}).get('trend_direction', 'N/A')}
-- RSI: {stock_analysis.get('technicals', {}).get('rsi', 50):.0f}
-- Volume: {stock_analysis.get('technicals', {}).get('volume_ratio', 1):.1f}x average
-
-MARKET CONTEXT:
-- Regime: {market_data.get('regime', 'Unknown')}
-- VIX: {market_data.get('vix', {}).get('level', 'N/A')}
-- Market Bias: {market_data.get('strategy', {}).get('bias', 'N/A')}
-
-Respond in this format:
-VERDICT: [TAKE THE TRADE / WAIT / PASS]
-CONFIDENCE: [HIGH / MEDIUM / LOW]
-REASONING: [2-3 sentences why]
-IF_TAKING: [Specific entry, target, stop recommendations]
-RISK: [Key risk to watch]"""
-
-        try:
-            response = self._call_claude(prompt)
-            
-            # Parse response
-            result = {
-                'verdict': '',
-                'confidence': '',
-                'reasoning': '',
-                'if_taking': '',
-                'risk': '',
-                'raw': response
-            }
-            
-            for line in response.split('\n'):
-                if line.startswith('VERDICT:'):
-                    result['verdict'] = line.replace('VERDICT:', '').strip()
-                elif line.startswith('CONFIDENCE:'):
-                    result['confidence'] = line.replace('CONFIDENCE:', '').strip()
-                elif line.startswith('REASONING:'):
-                    result['reasoning'] = line.replace('REASONING:', '').strip()
-                elif line.startswith('IF_TAKING:'):
-                    result['if_taking'] = line.replace('IF_TAKING:', '').strip()
-                elif line.startswith('RISK:'):
-                    result['risk'] = line.replace('RISK:', '').strip()
-            
-            return result
-        except Exception as e:
-            return {"error": str(e)}
+        return AdvisorBriefing(has_content=False)
+    
+    def clear_cache(self):
+        """Clear cached briefing to force refresh"""
+        if "advisor_briefing" in _cache:
+            del _cache["advisor_briefing"]
 
 
-def get_advisor_briefing_dict(advisor: AITradingAdvisor,
-                               market: Dict, positions: Dict, risk: Dict,
-                               hot_list: List, journal: Dict, watchlist: List) -> Dict:
-    """Get advisor briefing as dictionary for web interface"""
-    briefing = advisor.get_briefing(market, positions, risk, hot_list, journal, watchlist)
+# ============== HELPER FUNCTION ==============
+
+def get_advisor_briefing_dict(advisor, market_data, positions_dict, portfolio_risk, 
+                               hot_list, journal_data, watchlist) -> Dict:
+    """
+    Compatibility wrapper - returns dict for template rendering.
+    Works with existing cockpit.py templates.
+    """
+    
+    # Convert positions dict to list
+    positions_list = []
+    if isinstance(positions_dict, dict):
+        for pid, p in positions_dict.items():
+            positions_list.append(p)
+    else:
+        positions_list = list(positions_dict) if positions_dict else []
+    
+    # Get journal stats
+    if isinstance(journal_data, dict):
+        journal_stats = journal_data.get('stats', journal_data)
+    else:
+        journal_stats = {'win_rate': 0, 'total_pnl': 0, 'total_trades': 0}
+    
+    # Get briefing
+    briefing = advisor.get_briefing(market_data, positions_list, journal_stats, hot_list)
     
     return {
-        'headline': briefing.headline,
-        'market_summary': briefing.market_summary,
-        'market_outlook': briefing.market_outlook,
+        'has_content': briefing.has_content,
+        'headline': '🎯 Expert Trading Briefing',
+        'market_summary': briefing.market_assessment[:200] + '...' if len(briefing.market_assessment) > 200 else briefing.market_assessment,
+        'market_outlook': briefing.market_assessment,
         'position_review': briefing.position_review,
-        'risk_assessment': briefing.risk_assessment,
-        'opportunities': briefing.opportunities,
-        'action_items': briefing.action_items,
-        'warnings': briefing.warnings,
-        'what_to_do_today': briefing.what_to_do_today,
-        'what_to_avoid': briefing.what_to_avoid,
-        'performance_insight': briefing.performance_insight,
+        'opportunities': briefing.todays_playbook,
+        'what_to_do_today': briefing.todays_playbook,
+        'what_to_avoid': briefing.risk_advisory,
+        'warnings': [briefing.risk_advisory] if briefing.risk_advisory else [],
+        'action_items': [briefing.todays_playbook] if briefing.todays_playbook else [],
+        'risk_assessment': briefing.risk_advisory,
+        'performance_insight': '',
         'generated_at': briefing.generated_at,
-        'model_used': briefing.model_used,
-        'has_content': bool(briefing.headline and 'Not Connected' not in briefing.headline),
+        'model': briefing.model_used,
+        'raw': briefing.raw_response
     }
+
+
+# ============== STANDALONE USAGE ==============
+
+if __name__ == "__main__":
+    # Test the advisor
+    advisor = ExpertAdvisor()
+    
+    test_market = {"vix": 18.5, "spy_change": 0.6}
+    test_positions = [
+        {"symbol": "AAPL", "strike": 185, "type": "LONG_CALL", "pnl_pct": 12, "dte": 14, "entry_price": 3.50, "current_price": 3.92, "delta": 0.55}
+    ]
+    test_stats = {"win_rate": 62, "total_pnl": 4500, "total_trades": 28, "profit_factor": 1.8}
+    
+    print("Getting expert briefing...")
+    briefing = advisor.get_briefing(test_market, test_positions, test_stats)
+    
+    if briefing.has_content:
+        print("\n" + "="*50)
+        print("MARKET ASSESSMENT:")
+        print(briefing.market_assessment)
+        print("\nPOSITION MANAGEMENT:")
+        print(briefing.position_review)
+        print("\nTODAY'S PLAYBOOK:")
+        print(briefing.todays_playbook)
+        print("\nRISK ADVISORY:")
+        print(briefing.risk_advisory)
+    else:
+        print("No API key configured")
